@@ -6,13 +6,16 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql._
 import org.apache.spark.sql.DataFrame
 import java.io.File
+
 import org.apache.log4j._
 import org.apache.spark.ml.classification._
 import org.apache.spark.ml.feature.MinMaxScaler
 import org.apache.spark.rdd.RDD
+
 import scala.util.{Failure, Random, Success, Try}
 import scala.io.Source
-
+import org.apache.spark.ml.clustering.KMeans
+import org.apache.spark.ml.knn.KNN
 
 //FIXME - turn classes back to Ints instead of Doubles
 object Sampling {
@@ -29,6 +32,10 @@ object Sampling {
 
   def maxValue(a: Double, b:Double): Double ={
     if(a >= b) { a }
+    else { b }
+  }
+  def minValue(a: Double, b:Double): Double ={
+    if(a <= b) { a }
     else { b }
   }
 
@@ -209,7 +216,7 @@ object Sampling {
 
   def main(args: Array[String]) {
 
-    val filename = "/tmp/input.txt"
+    val filename = "/home/ford/data/sampling_input.txt"
     val lines = Source.fromFile(filename).getLines.map(x=>x.split(":")(0)->x.split(":")(1)).toMap
     val input_file = lines("dataset").trim
     val classifier = lines("classifier").trim
@@ -275,11 +282,14 @@ object Sampling {
       val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
       val trainData = scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)).persist()
 
+      getCountsByClass(spark, "label", trainData).show
+
       var resultArray = Array[Array[String]]()
       for(samplingMethod <- samplingMethods) {
 
         val t0 = System.nanoTime()
         val sampledData = sampleData(spark, trainData, samplingMethod)
+        kMeansSmote(spark, trainData, 5)
         val t1 = System.nanoTime()
 
         val savePathString = savePath
@@ -352,7 +362,7 @@ object Sampling {
     c.select(cols: _*)
   }
 
-  def runClassifierMinorityType(train: DataFrame, test: DataFrame): Array[String] ={ //String = {
+  def runClassifierMinorityType(train: DataFrame, test: DataFrame): Array[String] ={
     val spark = train.sparkSession
     //FIXME - don't collect twice
     val maxLabel: Int = test.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble.toInt).max
@@ -396,6 +406,154 @@ object Sampling {
     val r = classDF.reduce(_ union _)
     r
   }
+
+
+  // FIXME - could be changed to one-vs-all for multiclass problems
+  def kMeansSmote(spark: SparkSession, dfIn: DataFrame, k: Int): Unit = {
+    val imbalanceRatioThreshold = 1.0 // FIXME - make parameter
+    val kSmote = 5          // FIXME - make parameter
+    // val densityExponent = 10 // FIXME - number of features
+    // cluster
+
+    val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
+    val counts = getCountsByClass(spark, "label", df).sort("_2")
+    val minClassLabel = counts.take(1)(0)(0).toString
+    val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    val samplesToAdd = maxClassCount - minClassCount
+    println("Samples to add: " + samplesToAdd)
+
+    val kmeans = new KMeans().setK(k).setSeed(1L) // FIXME - fix seed
+    val model = kmeans.fit(df)
+    val predictions = model.transform(df)
+
+    // filter
+    val clusters = (0 until k).map(x=>predictions.filter(predictions("prediction")===x)).toArray
+
+    val imbalancedRatios = clusters.map(x=>getImbalancedRatio(spark, x, minClassLabel))
+
+    val sparsity = (0 until k).map(x=>getSparsity(predictions.filter((predictions("prediction")===x)
+      && (predictions("label")===minClassLabel)), imbalancedRatios(x)))
+    val sparsitySum = sparsity.sum
+
+    val classSparsity = (0 until k).map(x=>(x, ((sparsity(x)/sparsitySum) * samplesToAdd).toInt))
+
+    for(x<-classSparsity) {
+      println(x._1, x._2)
+      if(x._2 > 0) {
+        sampleCluster(predictions.filter(predictions("prediction")===x._1 && predictions("label")===minClassLabel), x._2)
+      }
+    }
+
+    // over sampling
+  }
+
+
+  def getFeaturePoint(ax: Double, bx: Double) : Double ={
+    Random.nextDouble() * (maxValue(ax, bx) - minValue(ax, bx)) + minValue(ax, bx)
+  }
+
+  def getSmotePoint(a: Array[Double], b: Array[Double]): Array[Double] = {
+    a.indices.map(x => getFeaturePoint(a(x), b(x))).toArray
+  }
+
+  /// FIXME - check parameters
+  def sampleCluster(df: DataFrame, samplesToAdd: Int): Unit = {
+
+    val leafSize = 1000
+    val kValue = 5
+    val model = new KNN().setFeaturesCol("features")
+      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+      .setTopTreeLeafSize(leafSize)
+      .setSubTreeLeafSize(leafSize)
+       // .setSeed(42L)
+      .setK(kValue + 1) // include self example
+      .setAuxCols(Array("label", "features"))
+
+    val f = model.fit(df)
+    val t = f.transform(df)
+    t.show
+
+    val collected = t.collect()
+    val count = df.count.toInt
+    val randomIndicies = (0 to samplesToAdd).map(_ => Random.nextInt(count))
+
+    val xxx = collected.take(1)(0)
+    // println(xxx(4).toString.substring(13, xxx(4).toString.length - 1))
+    val yyy = xxx(4).toString.substring(13, xxx(4).toString.length - 3)
+    val zzz = yyy.split("]], ").map(x=>x.split(""",\[""")(1)).map(y=>y.split(",").map(z=>z.toDouble))
+
+    val a = zzz(0)
+    val b = zzz(Random.nextInt(kValue-1) + 1)
+
+    println("a")
+    for(x<-a) {
+      print(x + " ")
+    }
+    println("\n")
+
+    println("b")
+    for(x<-b) {
+      print(x + " ")
+    }
+    println("\n")
+
+    for(x<-getSmotePoint(a, b)) {
+      print(x + " ")
+    }
+    println("\n")
+
+  }
+
+  val toArr: Any => Array[Double] = _.asInstanceOf[DenseVector].toArray
+  val toArrUdf = udf(toArr)
+
+  def getTotalElementDistance(current: Array[Double], rows: Array[Array[Double]]): Double ={
+    rows.map(x=>getSingleDistance(x, current)).sum
+  }
+
+  def getSparsity(data: Dataset[Row], imbalancedRatio: Double): Double = {
+    // calculate all distances for minority class
+    println("at sparsitiy count " + data.count())
+    // data.show()
+    data.printSchema()
+    val collected: Array[Array[Double]] =  data.withColumn("features", toArrUdf(col("features"))).select("features").collect().map(x=>x.toString.substring(14, x.toString.length-2).split(",").map(x=>x.toDouble))
+    val n = collected.length // number of minority examples in cluster
+    val m = collected(0).length // number of features
+    val meanDistance = collected.map(x=>getTotalElementDistance(x, collected)).sum / ((n * n) - n)
+    val density = n / Math.pow(meanDistance, m)
+    val sparsity = 1 / density
+    sparsity
+  }
+
+  def getDistanceValue(train: Element, test: Element): DistanceResult = {
+    if (train._1 == test._1) {
+      (Float.MaxValue, train._2._1)
+    }
+    else {
+      val zipped = test._2._2.zip(train._2._2)
+      val result = zipped.map({ case (x, y) => (x - y) * (x - y) })
+      (result.sum, train._2._1) //removed sqrt
+    }
+  }
+
+  def getSingleDistance(x: Array[Double], y: Array[Double]): Double = {
+    var distance = 0.0
+    //for(index<-0 to x.length-1) {
+    for(index<-x.indices) {
+      distance += (x(index) -  y(index)) *(x(index) - y(index))
+    }
+    distance
+  }
+
+  def getImbalancedRatio(spark: SparkSession, data: Dataset[Row], minClassLabel: String): Double = {
+    val minorityCount = data.filter(data("label") === minClassLabel).count
+    val majorityCount = data.filter(data("label") =!= minClassLabel).count
+    (minorityCount + 1) / (majorityCount + 1).toDouble
+  }
+
 
   def sampleDataParallel(spark: SparkSession, df: DataFrame, presentClass: Int, samplingMethod: String, underSampleCount: Int, overSampleCount: Int, smoteSampleCount: Int): DataFrame = {
     val l = presentClass
