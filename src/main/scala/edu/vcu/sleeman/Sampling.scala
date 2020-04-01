@@ -527,10 +527,33 @@ object Sampling {
     val row = xxxx.first
     val zzz: Seq[DenseVector] = row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]]
 
-    generateSamples(spark, zzz, 5)
+    val result: Array[Array[Row]] = xxxx.collect.map(row=>generateSamples(row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]], s, minClassLabel.toInt))
+    val fooX: Array[Row] = result.flatMap(x=>x.toSeq)
+    println("len: " + xxxx.count())
+    println("foo: " + fooX.length)
 
+    val foo: Array[(Long, Int, DenseVector)] = fooX.map(x=>x.toSeq).map(x=>(x(0).toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector]))
+    val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
+    val bar2 = bar.withColumnRenamed("_1", "index")
+      .withColumnRenamed("_2", "label")
+      .withColumnRenamed("_3", "features")
 
-    df
+    bar2.show
+    println(bar2.count)
+
+    val all = df.union(bar2)
+    println("***********")
+    all.show()
+    println("all: " + all.count())
+    val ooo: DataFrame = getCountsByClass(spark, "label", all)
+    ooo.show
+    println("***********")
+
+    //val result = generateSamples(spark, zzz, 5)
+    //println("~~~~~~~~~~~~~~~~~" + result(0))
+    //val result: Dataset[mutable.WrappedArray[DenseVector]] = xxxx.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]])
+
+    all
   }
 
   /*val test: UserDefinedFunction = udf((neighbors: mutable.WrappedArray[Element]) =: {
@@ -546,14 +569,12 @@ object Sampling {
   ).toOption)
 
 
-  def getNewSample(spark: SparkSession, current: DenseVector, i: DenseVector) : DenseVector = {
-    import spark.implicits._
+  def getNewSample(current: DenseVector, i: DenseVector) : DenseVector = {
     val xx: Array[Array[Double]] = Array(current.values, i.values)
     val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * (x(1)-x(0)))
 
 
-
-    println("current")
+    /*println("current")
     for(x<-current.values) {
       print(x + " ")
     }
@@ -572,17 +593,17 @@ object Sampling {
     println("")
 
     println("****************")
-
+*/
 
    current
   }
 
-  def generateSamples(spark: SparkSession, neighbors: Seq[DenseVector], s: Int): Array[Row] = {
+  def generateSamples(neighbors: Seq[DenseVector], s: Int, label: Int): Array[Row] = {
 
     val current = neighbors.head
     val selected: Seq[DenseVector] = Random.shuffle(neighbors.tail).take(s)
 
-    val rows = selected.map(x=>getNewSample(spark, current, x)).map(x=>Row(0, 0, x))
+    val rows = selected.map(x=>getNewSample(current, x)).map(x=>Row(0, label, x))
 
     //val nearestClasses2: DenseVector = neighbors.getAs("features").asInstanceOf[DenseVector]
     //val nearestClasses2: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.getAs("neighbors").asInstanceOf[mutable.WrappedArray[Element]] //.asInstanceOf[DenseVector]
@@ -716,6 +737,7 @@ object Sampling {
 
     val all = df.union(bar2)
     all.show()
+    getCountsByClass(spark, "label", df).show
     println("all: " + all.count())
 
     // over sampling
