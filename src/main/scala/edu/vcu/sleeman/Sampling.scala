@@ -6,6 +6,7 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql._
 import org.apache.spark.sql.DataFrame
 import java.io.File
+import java.sql.Struct
 
 import org.apache.log4j._
 import org.apache.spark.ml.classification._
@@ -16,6 +17,11 @@ import scala.util.{Failure, Random, Success, Try}
 import scala.io.Source
 import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.knn.KNN
+import org.apache.spark.sql.expressions.UserDefinedFunction
+import org.apache.spark.sql.functions.typedLit
+
+
+import scala.collection.mutable
 
 //FIXME - turn classes back to Ints instead of Doubles
 object Sampling {
@@ -288,8 +294,17 @@ object Sampling {
       for(samplingMethod <- samplingMethods) {
 
         val t0 = System.nanoTime()
-        val sampledData = sampleData(spark, trainData, samplingMethod)
-        kMeansSmote(spark, trainData, 5)
+        val sampledData = if(samplingMethod == "kMeansSmote") {
+          kMeansSmote(spark, trainData, 5)
+        }
+        else if(samplingMethod == "borderlineSmote") {
+          borderlineSmote(spark, trainData)
+        }
+        else {
+          sampleData(spark, trainData, samplingMethod)
+        }
+        // sampledData.show
+
         val t1 = System.nanoTime()
 
         val savePathString = savePath
@@ -388,6 +403,244 @@ object Sampling {
     calculateClassifierResults(test.select("label").distinct(), confusionMatrix)
   }
 
+
+  /*************************************************/
+  /************borderline SMOTE*****************/
+  /*************************************************/
+
+  /*def isDangerStatus(nearestClasses: Array[Int]): Boolean = {
+    val currentClass = nearestClasses(0)
+    val majorityNeighbors = nearestClasses.tail.map(x=>if(x==currentClass) 0 else 1).sum
+
+    val numberOfNeighbors = nearestClasses.length - 1
+
+    println("numberOfNeighbors: " + numberOfNeighbors + " majorityNeighbors: " + majorityNeighbors)
+
+    if(numberOfNeighbors / 2 <= majorityNeighbors && majorityNeighbors < numberOfNeighbors) {
+      true
+    } else {
+      false
+    }
+  }*/
+
+  val isDanger: UserDefinedFunction = udf((neighbors: mutable.WrappedArray[Element]) => {
+    //println(neighbors.toIndexedSeq(0))
+
+    //val bar: Seq[(Long, (Int, Array[Float]))] = neighbors.toIndexedSeq
+    //println(neighbors)
+    val nearestClasses = neighbors.asInstanceOf[mutable.WrappedArray[Int]]
+
+    /*for(x<-nearestClasses) {
+      println("here-> " + x)
+    }*/
+    val currentClass = nearestClasses(0)
+    val majorityNeighbors = nearestClasses.tail.map(x=>if(x==currentClass) 0 else 1).sum
+
+    val numberOfNeighbors = nearestClasses.length - 1
+
+    //println("numberOfNeighbors: " + numberOfNeighbors + " majorityNeighbors: " + majorityNeighbors)
+
+    if(numberOfNeighbors / 2 <= majorityNeighbors && majorityNeighbors < numberOfNeighbors) {
+      true
+    } else {
+      false
+    }
+  })
+
+  def borderlineSmote(spark: SparkSession, dfIn: DataFrame): DataFrame = {
+    val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
+    val m = 5   // k-value
+    val leafSize = 1000
+
+    val counts = getCountsByClass(spark, "label", df).sort("_2")
+    val minClassLabel = counts.take(1)(0)(0).toString
+    val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    val samplesToAdd = maxClassCount - minClassCount
+    println("Samples to add: " + samplesToAdd)
+
+    // step 1
+    /*** For each minority example, calculate the m nn's in training set***/
+    val minorityDF = df.filter(df("label")===minClassLabel)
+    val model = new KNN().setFeaturesCol("features")
+      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+      .setTopTreeLeafSize(leafSize)
+      .setSubTreeLeafSize(leafSize)
+      .setK(m + 1) // include self example
+      .setAuxCols(Array("label", "features"))
+
+    val f = model.fit(df)
+    val t = f.transform(minorityDF)
+
+
+    // step 2
+    /*** Find DANGER examples: if m'=m (noise), m/2 < m' < m (DANGER), 0 <= m' <= m/2 (safe)***/
+    t.show()
+    t.printSchema()
+
+
+    println("Is danger")
+    val dfDanger = t.filter(isDanger(t("neighbors").getItem("label")))
+    dfDanger.show()
+    println(minorityDF.count())
+    println(dfDanger.count)
+
+    // step 3
+    /*** For all DANGER examples, find k nearest examples from minority class***/
+    val kValue = 5 /// FIXME - check the k/m values
+    val model2 = new KNN().setFeaturesCol("features")
+      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+      .setTopTreeLeafSize(leafSize)
+      .setSubTreeLeafSize(leafSize)
+      .setK(kValue + 1) // include self example
+      .setAuxCols(Array("label", "features"))
+
+    val f2 = model2.fit(df.filter(df("label")===minClassLabel))
+    val t2 = f2.transform(dfDanger.drop("neighbors"))
+
+    // step 4
+    val s = 3
+    /*** generate (s * DANGER examples)
+      *  p'i = borderline minority examples
+      *  s = integer between 1 and k
+      *  for each p'i, randomly select its s nearest neighbors in P and find distances to p'i.
+      *  Get rand (0,1) - r for each so s synthetic examples are created using p'i * r(j) * difference(j)
+      *
+    ***/
+    import spark.implicits._
+
+    val temp: Row = t2.take(1)(0)
+    println(temp)
+
+    import org.apache.spark.sql._
+    import spark.implicits._
+    val zz: Int = spark.sparkContext.parallelize(Array(1,2,3)).map(Row(_)).collect()(0).getInt(0)
+    println("zz " + zz)
+
+    val xxxx: DataFrame = t2.select($"neighbors.features")
+    xxxx.show()
+
+    xxxx.printSchema()
+
+    val row = xxxx.first
+    val zzz: Seq[DenseVector] = row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]]
+
+    generateSamples(spark, zzz, 5)
+
+
+    df
+  }
+
+  /*val test: UserDefinedFunction = udf((neighbors: mutable.WrappedArray[Element]) =: {
+    println("xxx")
+  })*/
+
+  def bar(x: Element): Unit = {
+    println("xxx")
+  }
+
+  val getLabel = udf((neighbors: Seq[Row]) => scala.util.Try(
+    neighbors.map(_.getAs[Int]("label"))
+  ).toOption)
+
+
+  def getNewSample(spark: SparkSession, current: DenseVector, i: DenseVector) : DenseVector = {
+    import spark.implicits._
+    val xx: Array[Array[Double]] = Array(current.values, i.values)
+    val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * (x(1)-x(0)))
+
+
+
+    println("current")
+    for(x<-current.values) {
+      print(x + " ")
+    }
+    println("")
+
+    println("sample")
+    for(x<-sample) {
+      print(x + " ")
+    }
+    println("")
+
+    println("other")
+    for(x<-i.values) {
+      print(x + " ")
+    }
+    println("")
+
+    println("****************")
+
+
+   current
+  }
+
+  def generateSamples(spark: SparkSession, neighbors: Seq[DenseVector], s: Int): Array[Row] = {
+
+    val current = neighbors.head
+    val selected: Seq[DenseVector] = Random.shuffle(neighbors.tail).take(s)
+
+    val rows = selected.map(x=>getNewSample(spark, current, x)).map(x=>Row(0, 0, x))
+
+    //val nearestClasses2: DenseVector = neighbors.getAs("features").asInstanceOf[DenseVector]
+    //val nearestClasses2: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.getAs("neighbors").asInstanceOf[mutable.WrappedArray[Element]] //.asInstanceOf[DenseVector]
+
+
+    /*val nearestClasses2: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.getAs("neighbors")
+
+
+    println(nearestClasses2(2))
+
+
+
+    val vect = nearestClasses2.map(x=>x.asInstanceOf[Element])
+
+    //val foo = nearestClasses2.toArray
+    //println("foo length: " + foo.length)
+
+
+
+    val xxxx: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.get(3).asInstanceOf[mutable.WrappedArray[Element]]
+    val bar: mutable.Seq[(Int, Array[Float])] = xxxx.map(x=>x._2)
+
+    val xxx: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.get(3).asInstanceOf[mutable.WrappedArray[Element]].map(_=>asInstanceOf[Element])
+    val yyy = xxx
+    println(yyy)*/
+    ///println(yyy._1)
+
+    //println(neighbors.toIndexedSeq(0))
+
+    //val foo = nearestClasses2.toList
+    //val bar = foo.map(_=>asInstanceOf[Element])
+    //println(bar)
+    //warr.toArray.map(_.asInstanceOf[Int])
+    //val xxx: Array[(Long, (Int, Array[Float]))] = nearestClasses2.array
+    //println(nearestClasses2.foreach(println))
+
+    //val bar: Seq[(Long, (Int, Array[Float]))] = neighbors.toIndexedSeq
+    //println(neighbors)
+    //val nearestClasses = neighbors(3) //(3).asInstanceOf[mutable.WrappedArray[Element]].toSeq.map(x=>x._1)
+    // println(nearestClasses.asInstanceOf[mutable.WrappedArray[Element]](0))
+
+
+
+    //val bar = nearestClasses.asInstanceOf[mutable.WrappedArray[Element]](0)
+/*for(x<-nearestClasses) {
+      println(x)
+    }/8
+
+
+   */
+    rows.toArray
+  }
+
+
+  /*************************************************/
+
+
+
   def sampleData(spark: SparkSession, df: DataFrame, samplingMethod: String): DataFrame = {
     val d = df.select("label").distinct()
     val presentClasses: Array[Int] = d.select("label").rdd.map(r => r(0)).collect().map(x=>x.toString.toInt)
@@ -409,7 +662,7 @@ object Sampling {
 
 
   // FIXME - could be changed to one-vs-all for multiclass problems
-  def kMeansSmote(spark: SparkSession, dfIn: DataFrame, k: Int): Unit = {
+  def kMeansSmote(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
     val imbalanceRatioThreshold = 1.0 // FIXME - make parameter
     val kSmote = 5          // FIXME - make parameter
     // val densityExponent = 10 // FIXME - number of features
@@ -440,14 +693,33 @@ object Sampling {
 
     val classSparsity = (0 until k).map(x=>(x, ((sparsity(x)/sparsitySum) * samplesToAdd).toInt))
 
+    var sampledDataset: Array[Row] = Array[Row]()
+
     for(x<-classSparsity) {
       println(x._1, x._2)
       if(x._2 > 0) {
-        sampleCluster(predictions.filter(predictions("prediction")===x._1 && predictions("label")===minClassLabel), x._2)
+        sampledDataset = sampledDataset ++ sampleCluster(predictions.filter(predictions("prediction")===x._1 && predictions("label")===minClassLabel), x._1, x._2)
       }
     }
+    import spark.implicits._
+
+    val foo: Array[(Long, Int, DenseVector)] = sampledDataset.map(x=>x.toSeq).map(x=>(x(0).toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector]))
+
+    println("sampled count: " + sampledDataset.length)
+    val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
+    val bar2 = bar.withColumnRenamed("_1", "index")
+      .withColumnRenamed("_2", "label")
+      .withColumnRenamed("_3", "features")
+
+    bar2.show
+    println(bar2.count)
+
+    val all = df.union(bar2)
+    all.show()
+    println("all: " + all.count())
 
     // over sampling
+    all
   }
 
 
@@ -459,8 +731,14 @@ object Sampling {
     a.indices.map(x => getFeaturePoint(a(x), b(x))).toArray
   }
 
+  def getSmoteExample(knnExamples: Array[Array[Double]]): Array[Double] ={
+    val a = knnExamples(0)
+    val b = knnExamples(Random.nextInt(knnExamples.length))
+    getSmotePoint(a, b)
+  }
+
   /// FIXME - check parameters
-  def sampleCluster(df: DataFrame, samplesToAdd: Int): Unit = {
+  def sampleCluster(df: DataFrame, cls: Int, samplesToAdd: Int): Array[Row] = {
 
     val leafSize = 1000
     val kValue = 5
@@ -468,7 +746,6 @@ object Sampling {
       .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
       .setTopTreeLeafSize(leafSize)
       .setSubTreeLeafSize(leafSize)
-       // .setSeed(42L)
       .setK(kValue + 1) // include self example
       .setAuxCols(Array("label", "features"))
 
@@ -478,37 +755,18 @@ object Sampling {
 
     val collected = t.collect()
     val count = df.count.toInt
+
+    // examples/k neighbors/features of Doubles
+    val examples: Array[Array[Array[Double]]] = collected.map(x=>x(4).toString.substring(13, x(4).toString.length - 3).split("]], ").map(x=>x.split(""",\[""")(1)).map(y=>y.split(",").map(z=>z.toDouble)))
     val randomIndicies = (0 to samplesToAdd).map(_ => Random.nextInt(count))
 
-    val xxx = collected.take(1)(0)
-    // println(xxx(4).toString.substring(13, xxx(4).toString.length - 1))
-    val yyy = xxx(4).toString.substring(13, xxx(4).toString.length - 3)
-    val zzz = yyy.split("]], ").map(x=>x.split(""",\[""")(1)).map(y=>y.split(",").map(z=>z.toDouble))
+    val syntheticExamples = randomIndicies.par.map(x=>getSmoteExample(examples(x))).toArray
 
-    val a = zzz(0)
-    val b = zzz(Random.nextInt(kValue-1) + 1)
-
-    println("a")
-    for(x<-a) {
-      print(x + " ")
-    }
-    println("\n")
-
-    println("b")
-    for(x<-b) {
-      print(x + " ")
-    }
-    println("\n")
-
-    for(x<-getSmotePoint(a, b)) {
-      print(x + " ")
-    }
-    println("\n")
-
+    syntheticExamples.map(x=>Row(0, cls, Vectors.dense(x)))
   }
 
   val toArr: Any => Array[Double] = _.asInstanceOf[DenseVector].toArray
-  val toArrUdf = udf(toArr)
+  val toArrUdf: UserDefinedFunction = udf(toArr)
 
   def getTotalElementDistance(current: Array[Double], rows: Array[Array[Double]]): Double ={
     rows.map(x=>getSingleDistance(x, current)).sum
@@ -528,20 +786,8 @@ object Sampling {
     sparsity
   }
 
-  def getDistanceValue(train: Element, test: Element): DistanceResult = {
-    if (train._1 == test._1) {
-      (Float.MaxValue, train._2._1)
-    }
-    else {
-      val zipped = test._2._2.zip(train._2._2)
-      val result = zipped.map({ case (x, y) => (x - y) * (x - y) })
-      (result.sum, train._2._1) //removed sqrt
-    }
-  }
-
   def getSingleDistance(x: Array[Double], y: Array[Double]): Double = {
     var distance = 0.0
-    //for(index<-0 to x.length-1) {
     for(index<-x.indices) {
       distance += (x(index) -  y(index)) *(x(index) - y(index))
     }
