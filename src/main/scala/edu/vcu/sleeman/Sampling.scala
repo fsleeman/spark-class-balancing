@@ -298,7 +298,8 @@ object Sampling {
           kMeansSmote(spark, trainData, 5)
         }
         else if(samplingMethod == "borderlineSmote") {
-          borderlineSmote(spark, trainData)
+          //borderlineSmote1(spark, trainData)
+          borderlineSmote2(spark, trainData)
         }
         else {
           sampleData(spark, trainData, samplingMethod)
@@ -407,38 +408,11 @@ object Sampling {
   /*************************************************/
   /************borderline SMOTE*****************/
   /*************************************************/
-
-  /*def isDangerStatus(nearestClasses: Array[Int]): Boolean = {
-    val currentClass = nearestClasses(0)
-    val majorityNeighbors = nearestClasses.tail.map(x=>if(x==currentClass) 0 else 1).sum
-
-    val numberOfNeighbors = nearestClasses.length - 1
-
-    println("numberOfNeighbors: " + numberOfNeighbors + " majorityNeighbors: " + majorityNeighbors)
-
-    if(numberOfNeighbors / 2 <= majorityNeighbors && majorityNeighbors < numberOfNeighbors) {
-      true
-    } else {
-      false
-    }
-  }*/
-
   val isDanger: UserDefinedFunction = udf((neighbors: mutable.WrappedArray[Element]) => {
-    //println(neighbors.toIndexedSeq(0))
-
-    //val bar: Seq[(Long, (Int, Array[Float]))] = neighbors.toIndexedSeq
-    //println(neighbors)
     val nearestClasses = neighbors.asInstanceOf[mutable.WrappedArray[Int]]
-
-    /*for(x<-nearestClasses) {
-      println("here-> " + x)
-    }*/
     val currentClass = nearestClasses(0)
     val majorityNeighbors = nearestClasses.tail.map(x=>if(x==currentClass) 0 else 1).sum
-
     val numberOfNeighbors = nearestClasses.length - 1
-
-    //println("numberOfNeighbors: " + numberOfNeighbors + " majorityNeighbors: " + majorityNeighbors)
 
     if(numberOfNeighbors / 2 <= majorityNeighbors && majorityNeighbors < numberOfNeighbors) {
       true
@@ -447,7 +421,18 @@ object Sampling {
     }
   })
 
-  def borderlineSmote(spark: SparkSession, dfIn: DataFrame): DataFrame = {
+
+  def borderlineSmote1(spark: SparkSession, dfIn: DataFrame): DataFrame = {
+    borderlineSmote(spark, dfIn, 1)
+  }
+
+  def borderlineSmote2(spark: SparkSession, dfIn: DataFrame): DataFrame = {
+    borderlineSmote(spark, dfIn, 2)
+  }
+
+  def borderlineSmote(spark: SparkSession, dfIn: DataFrame, mode: Int): DataFrame = {
+    import spark.implicits._
+
     val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
     val m = 5   // k-value
     val leafSize = 1000
@@ -487,6 +472,8 @@ object Sampling {
     println(minorityDF.count())
     println(dfDanger.count)
 
+    val s = 3
+
     // step 3
     /*** For all DANGER examples, find k nearest examples from minority class***/
     val kValue = 5 /// FIXME - check the k/m values
@@ -500,8 +487,12 @@ object Sampling {
     val f2 = model2.fit(df.filter(df("label")===minClassLabel))
     val t2 = f2.transform(dfDanger.drop("neighbors"))
 
+
+
+
+
     // step 4
-    val s = 3
+
     /*** generate (s * DANGER examples)
       *  p'i = borderline minority examples
       *  s = integer between 1 and k
@@ -509,59 +500,68 @@ object Sampling {
       *  Get rand (0,1) - r for each so s synthetic examples are created using p'i * r(j) * difference(j)
       *
     ***/
-    import spark.implicits._
 
-    val temp: Row = t2.take(1)(0)
-    println(temp)
+    //val temp: Row = t2.take(1)(0)
+   // println(temp)
 
-    import org.apache.spark.sql._
-    import spark.implicits._
-    val zz: Int = spark.sparkContext.parallelize(Array(1,2,3)).map(Row(_)).collect()(0).getInt(0)
-    println("zz " + zz)
+    //import org.apache.spark.sql._
+
+    //val zz: Int = spark.sparkContext.parallelize(Array(1,2,3)).map(Row(_)).collect()(0).getInt(0)
+    //println("zz " + zz)
 
     val xxxx: DataFrame = t2.select($"neighbors.features")
-    xxxx.show()
+    //xxxx.show()
 
-    xxxx.printSchema()
+    //xxxx.printSchema()
 
-    val row = xxxx.first
-    val zzz: Seq[DenseVector] = row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]]
+    val result: Array[Array[Row]] = xxxx.collect.map(row=>generateSamples(row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]], s, 1.0, minClassLabel.toInt))
 
-    val result: Array[Array[Row]] = xxxx.collect.map(row=>generateSamples(row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]], s, minClassLabel.toInt))
-    val fooX: Array[Row] = result.flatMap(x=>x.toSeq)
+    // mode = 1: borderlineSMOTE1: use minority NNs
+    // mode = 2: borderlineSMOTE2: use minority NNs AND majority NNs
+    val fooX: Array[Row] = if(mode == 1) {
+      result.flatMap(x => x.toSeq)
+    }
+    else {
+      val modelNegative = new KNN().setFeaturesCol("features")
+        .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+        .setTopTreeLeafSize(leafSize)
+        .setSubTreeLeafSize(leafSize)
+        .setK(kValue + 1) // include self example
+        .setAuxCols(Array("label", "features"))
+
+      val fNegative = modelNegative.fit(df.filter(df("label")=!=minClassLabel))
+      val tNegative = fNegative.transform(dfDanger.drop("neighbors"))
+
+      val nearestNegativeExamples: DataFrame = tNegative.select($"neighbors.features")
+      val nearestNegativeSamples: Array[Array[Row]] = nearestNegativeExamples.collect.map(row=>generateSamples(row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]], s, 0.5, minClassLabel.toInt))
+      val nearestNegativeRows: Array[Row] = nearestNegativeSamples.flatMap(x=>x.toSeq)
+
+      result.flatMap(x => x.toSeq) ++ nearestNegativeRows
+    }
+
+
     println("len: " + xxxx.count())
     println("foo: " + fooX.length)
 
-    val foo: Array[(Long, Int, DenseVector)] = fooX.map(x=>x.toSeq).map(x=>(x(0).toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector]))
+    val foo: Array[(Long, Int, DenseVector)] = fooX.map(x=>x.toSeq).map(x=>(x.head.toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector]))
     val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
     val bar2 = bar.withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
 
-    bar2.show
-    println(bar2.count)
+    //bar2.show
+    //bar2.printSchema()
+    //println(bar2.count)
 
     val all = df.union(bar2)
-    println("***********")
+    //println("***********")
     all.show()
     println("all: " + all.count())
-    val ooo: DataFrame = getCountsByClass(spark, "label", all)
-    ooo.show
-    println("***********")
-
-    //val result = generateSamples(spark, zzz, 5)
-    //println("~~~~~~~~~~~~~~~~~" + result(0))
-    //val result: Dataset[mutable.WrappedArray[DenseVector]] = xxxx.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features").asInstanceOf[mutable.WrappedArray[DenseVector]])
+    ////val ooo: DataFrame = getCountsByClass(spark, "label", all)
+    //ooo.show
+    //println("***********")
 
     all
-  }
-
-  /*val test: UserDefinedFunction = udf((neighbors: mutable.WrappedArray[Element]) =: {
-    println("xxx")
-  })*/
-
-  def bar(x: Element): Unit = {
-    println("xxx")
   }
 
   val getLabel = udf((neighbors: Seq[Row]) => scala.util.Try(
@@ -569,94 +569,19 @@ object Sampling {
   ).toOption)
 
 
-  def getNewSample(current: DenseVector, i: DenseVector) : DenseVector = {
+  def getNewSample(current: DenseVector, i: DenseVector, range: Double) : DenseVector = {
     val xx: Array[Array[Double]] = Array(current.values, i.values)
-    val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * (x(1)-x(0)))
-
-
-    /*println("current")
-    for(x<-current.values) {
-      print(x + " ")
-    }
-    println("")
-
-    println("sample")
-    for(x<-sample) {
-      print(x + " ")
-    }
-    println("")
-
-    println("other")
-    for(x<-i.values) {
-      print(x + " ")
-    }
-    println("")
-
-    println("****************")
-*/
-
-   current
+    val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * range * (x(1)-x(0)))
+    Vectors.dense(sample).toDense
   }
 
-  def generateSamples(neighbors: Seq[DenseVector], s: Int, label: Int): Array[Row] = {
+  def generateSamples(neighbors: Seq[DenseVector], s: Int, range: Double, label: Int): Array[Row] = {
 
     val current = neighbors.head
     val selected: Seq[DenseVector] = Random.shuffle(neighbors.tail).take(s)
-
-    val rows = selected.map(x=>getNewSample(current, x)).map(x=>Row(0, label, x))
-
-    //val nearestClasses2: DenseVector = neighbors.getAs("features").asInstanceOf[DenseVector]
-    //val nearestClasses2: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.getAs("neighbors").asInstanceOf[mutable.WrappedArray[Element]] //.asInstanceOf[DenseVector]
-
-
-    /*val nearestClasses2: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.getAs("neighbors")
-
-
-    println(nearestClasses2(2))
-
-
-
-    val vect = nearestClasses2.map(x=>x.asInstanceOf[Element])
-
-    //val foo = nearestClasses2.toArray
-    //println("foo length: " + foo.length)
-
-
-
-    val xxxx: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.get(3).asInstanceOf[mutable.WrappedArray[Element]]
-    val bar: mutable.Seq[(Int, Array[Float])] = xxxx.map(x=>x._2)
-
-    val xxx: mutable.Seq[(Long, (Int, Array[Float]))] = neighbors.get(3).asInstanceOf[mutable.WrappedArray[Element]].map(_=>asInstanceOf[Element])
-    val yyy = xxx
-    println(yyy)*/
-    ///println(yyy._1)
-
-    //println(neighbors.toIndexedSeq(0))
-
-    //val foo = nearestClasses2.toList
-    //val bar = foo.map(_=>asInstanceOf[Element])
-    //println(bar)
-    //warr.toArray.map(_.asInstanceOf[Int])
-    //val xxx: Array[(Long, (Int, Array[Float]))] = nearestClasses2.array
-    //println(nearestClasses2.foreach(println))
-
-    //val bar: Seq[(Long, (Int, Array[Float]))] = neighbors.toIndexedSeq
-    //println(neighbors)
-    //val nearestClasses = neighbors(3) //(3).asInstanceOf[mutable.WrappedArray[Element]].toSeq.map(x=>x._1)
-    // println(nearestClasses.asInstanceOf[mutable.WrappedArray[Element]](0))
-
-
-
-    //val bar = nearestClasses.asInstanceOf[mutable.WrappedArray[Element]](0)
-/*for(x<-nearestClasses) {
-      println(x)
-    }/8
-
-
-   */
+    val rows = selected.map(x=>getNewSample(current, x, range)).map(x=>Row(0, label, x))
     rows.toArray
   }
-
 
   /*************************************************/
 
