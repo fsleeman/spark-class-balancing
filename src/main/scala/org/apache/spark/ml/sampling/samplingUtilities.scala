@@ -5,6 +5,7 @@ import org.apache.spark.sql.functions.count
 
 package object utils {
   type Element = (Long, (Int, Array[Float]))
+  type Element2 = (Int, Array[Float])
 
 
   def getCountsByClass(spark: SparkSession, label: String, df: DataFrame): DataFrame = {

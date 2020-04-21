@@ -147,7 +147,7 @@ class kMeansSmote {
   /// FIXME - check parameters
   private def sampleCluster(df: DataFrame, cls: Int, samplesToAdd: Int): Array[Row] = {
 
-    val leafSize = 1000
+    val leafSize = 100
     val kValue = 5
     val model = new KNN().setFeaturesCol("features")
       .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
