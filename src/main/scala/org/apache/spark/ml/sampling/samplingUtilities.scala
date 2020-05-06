@@ -1,14 +1,17 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.count
+import org.apache.spark.sql.types.StructField
+import org.apache.spark.sql._
 
-package object utils {
+
+object utils {
   type Element = (Long, (Int, Array[Float]))
-  type Element2 = (Int, Array[Float])
+  //type Element2 = ()
 
-
-  def getCountsByClass(spark: SparkSession, label: String, df: DataFrame): DataFrame = {
+ def getCountsByClass(spark: SparkSession, label: String, df: DataFrame): DataFrame ={
     val numberOfClasses = df.select("label").distinct().count()
     val aggregatedCounts = df.groupBy(label).agg(count(label)).take(numberOfClasses.toInt) //FIXME
 

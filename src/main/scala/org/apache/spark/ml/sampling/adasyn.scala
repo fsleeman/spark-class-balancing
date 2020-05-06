@@ -2,7 +2,7 @@ package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.sampling.utils.{Element, Element2, getCountsByClass}
+import org.apache.spark.ml.sampling.utils.{Element, getCountsByClass}
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{Column, DataFrame, Dataset, Row, SparkSession}
@@ -14,13 +14,13 @@ import scala.util.Random
 class adasyn {
 
   //val getMajorityNeighborCount2: UserDefinedFunction = udf((neighbors: mutable.WrappedArray[(Int, Element)]) => {
-  val getMajorityNeighborCount2: UserDefinedFunction = udf((neighbors: Array[Element2]) => {
+  /*val getMajorityNeighborCount2: UserDefinedFunction = udf((neighbors: Array[Element2]) => {
     val nearestClasses = neighbors.asInstanceOf[mutable.WrappedArray[Int]]
     val currentClass = nearestClasses(0)
     val majorityNeighbors = nearestClasses.tail.map(x=>if(x==currentClass) 0 else 1).sum
     //majorityNeighbors
     1
-  })
+  })*/
 
 
   def generateExamples(row: Row): Array[Array[Double]] ={
