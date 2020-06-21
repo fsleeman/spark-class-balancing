@@ -20,7 +20,7 @@ class smote {
 
     val gap = randomNeighbor.indices.map(_=>Random.nextDouble()).toArray
 
-    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, gap).transpose.map(x=>x(0) + x(2) * (x(0)-x(1)))).toDense
+    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, gap).transpose.map(x=>x(0) + x(2) * (x(0)-x(1)))).toDense /// FIXME check order
 
     Row(index, label, syntheticExample)
   }

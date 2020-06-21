@@ -2,9 +2,11 @@ package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions.count
+import org.apache.spark.sql.functions.{count, udf}
 import org.apache.spark.sql.types.StructField
 import org.apache.spark.sql._
+
+import scala.collection.mutable
 
 
 object utils {
@@ -20,6 +22,26 @@ object utils {
     val rdd = sc.parallelize(countSeq)
 
     spark.createDataFrame(rdd)
+  }
+
+  val getMatchingClassCount = udf((array: mutable.WrappedArray[Int], minorityClassLabel: Int) => {
+    def isMajorityNeighbor(x1: Int, x2: Int): Int = {
+      if(x1 == x2) {
+        1
+      } else {
+        0
+      }
+    }
+    array.tail.map(x=>isMajorityNeighbor(minorityClassLabel, x)).sum
+  })
+
+  // set for different methods
+  def pointDifference(x1: Array[Double], x2: Array[Double]): Double = {
+    val combined = Array[Array[Double]](x1, x2)
+    // val difference: Array[Double] = combined.transpose.map(x=>Math.abs(x(0)-x(1)))
+    // difference.sum
+    val difference: Array[Double] = combined.transpose.map(x=>Math.pow(x(0)-x(1), 2))
+    Math.sqrt(difference.sum)
   }
 
 }

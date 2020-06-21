@@ -66,7 +66,7 @@ class BorderlineSmote {
       .setAuxCols(Array("label", "features"))
 
     val f = model.fit(df)
-    val t = f.transform(minorityDF)
+    val t = f.transform(minorityDF) // FIXME - check if the nearest neighbor should be ignored or not
 
 
     // step 2
