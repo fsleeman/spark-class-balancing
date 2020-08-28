@@ -1,5 +1,8 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.knn.KNN
+import org.apache.spark.ml.sampling.utils.getCountsByClass
+import org.apache.spark.sql.functions.desc
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
 
@@ -126,6 +129,57 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 class ANS {
 
   def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
+    import spark.implicits._
+
+    val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
+    val counts = getCountsByClass(spark, "label", df).sort("_2")
+    val minClassLabel = counts.take(1)(0)(0).toString
+    val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    val samplesToAdd = maxClassCount - minClassCount
+    println("Samples to add: " + samplesToAdd)
+
+    val minorityDF = df.filter(df("label") === minClassLabel)
+
+    val C_max= (0.25*df.count()).toInt
+
+    val leafSize = 10 // FIXME
+
+    val model = new KNN().setFeaturesCol("features")
+      .setTopTreeSize(minorityDF.count().toInt / 8) /// FIXME - check?
+      .setTopTreeLeafSize(leafSize)
+      .setSubTreeLeafSize(leafSize)
+      .setK(1 + 1) // include self example
+      .setAuxCols(Array("label", "features"))
+
+    val f = model.fit(minorityDF)
+
+    val neighbors = f.transform(minorityDF).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
+    neighbors.show()
+    neighbors.printSchema()
+
+  /*
+  # finding the first minority neighbor of minority samples
+        nn= NearestNeighbors(n_neighbors= 2, n_jobs= self.n_jobs)
+        nn.fit(X_min)
+        dist, ind= nn.kneighbors(X_min)
+
+        # extracting the distances of first minority neighbors from minority samples
+        first_pos_neighbor_distances= dist[:,1]
+
+  # extracting the number of majority samples in the neighborhood of minority samples
+        out_border= []
+        for i in range(len(X_min)):
+            ind= nn.radius_neighbors(X_min[i].reshape(1, -1), first_pos_neighbor_distances[i], return_distance= False)
+            out_border.append(np.sum(y[ind[0]] == self.majority_label))
+
+        out_border= np.array(out_border)
+
+ */
+
+
     dfIn
   }
 

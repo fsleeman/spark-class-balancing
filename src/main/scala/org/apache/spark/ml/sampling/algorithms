@@ -19,13 +19,10 @@ https://www.sciencedirect.com/science/article/pii/S0020025518304997
 
 [Gaussian_SMOTE] Hansoo Lee and Jonggeun Kim and Sungshin Kim, "Gaussian-Based SMOTE Algorithm for Solving Skewed Class Distributions" , Int. J. Fuzzy Logic and Intelligent Systems, 2017, pp. 229-234
 [cluster_SMOTE]	Cieslak, D. A. and Chawla, N. V. and Striegel, A., "Combating imbalance in network intrusion datasets" , 2006 IEEE International Conference on Granular Computing, 2006, pp. 732-737
+[SMOTE_D]	Torre, "SMOTE-D a Deterministic Version of SMOTE" , Pattern Recognition, 2016, pp. 177--188
 
-
-
-Partial:
-7) MWMOTE
+7) MWMOTE (with issues)
 https://ieeexplore.ieee.org/document/6361394
-
 
 To Do:
 
@@ -36,11 +33,10 @@ https://content.sciendo.com/view/journals/amcs/27/4/article-p727.xml
 
 
 Possible Additional Algorithms
-
-[ANS]	Siriseriwan, W and Sinapiromsaran, Krung, "Adaptive neighbor synthetic minority oversampling technique under 1NN outcast handling" , Songklanakarin Journal of Science and Technology, 2017, pp. 565-576
 [SOMO]	Georgios Douzas and Fernando Bacao, "Self-Organizing Map Oversampling (SOMO) for imbalanced data set learning" , Expert Systems with Applications, 2017, pp. 40 - 52
-[SMOTE_D]	Torre, "SMOTE-D a Deterministic Version of SMOTE" , Pattern Recognition, 2016, pp. 177--188
-[NRAS] William A. Rivera, "Noise Reduction A Priori Synthetic Over-Sampling for class imbalanced data sets" , Information Sciences, 2017, pp. 146 - 161
+    needs SOM (https://github.com/FlorentF9/sparkml-som), could add
 
+(maybe, use linear regression for propensity scores)[NRAS] William A. Rivera, "Noise Reduction A Priori Synthetic Over-Sampling for class imbalanced data sets" , Information Sciences, 2017, pp. 146 - 161
+(need to add distance based search for nearest neighbors) [ANS]	Siriseriwan, W and Sinapiromsaran, Krung, "Adaptive neighbor synthetic minority oversampling technique under 1NN outcast handling" , Songklanakarin Journal of Science and Technology, 2017, pp. 565-576
 
 (SVM based?) [SMOTE_PSO]	Jair Cervantes and Farid Garcia-Lamont and Lisbeth Rodriguez and Asdrúbal López and José Ruiz Castilla and Adrian Trueba, "PSO-based method for SVM classification on skewed data sets" , Neurocomputing, 2017, pp. 187 - 197

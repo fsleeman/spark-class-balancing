@@ -15,7 +15,10 @@ libraryDependencies += "org.apache.spark" %% "spark-mllib" % "2.2.0"
 
 resolvers += "Spark Packages Repo" at "http://dl.bintray.com/spark-packages/maven"
 
-libraryDependencies += "saurfang" % "spark-knn" % "0.2.0"
+// libraryDependencies += "saurfang" % "spark-knn" % "0.2.0"
+
+
+libraryDependencies += "org.apache.spark.ml,knn" % "spark-knn" % "0.2.0" from "file:////home/ford/repos/fsleeman/spark-knn/classes/artifacts/spark_knn_core_spark_knn_jar/spark-knn-core-spark-knn.jar"
 
 mainClass in assembly := Some("edu.vcu.sleeman.Sampling")
 
