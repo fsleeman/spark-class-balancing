@@ -323,7 +323,7 @@ object Sampling {
                val model = r.fit(trainData)
                model.transform(trainData)
              } else if(samplingMethod == "SMOTE") {
-               val r = new SMOTE
+               val r = new SMOTE // multi-class done
                val model = r.fit(trainData)
                model.transform(trainData)
              } else if(samplingMethod == "mwmote") {
@@ -358,6 +358,14 @@ object Sampling {
                val r = new NRAS()
                val model = r.fit(trainData)
                model.transform(trainData)
+             }  else if(samplingMethod == "randomOversample") {
+               val r = new RandomOversample() // multi-class done
+               val model = r.fit(trainData)
+               model.transform(trainData)
+             }  else if(samplingMethod == "randomUndersample") {
+               val r = new RandomUndersample() // multi-class done
+               val model = r.fit(trainData)
+               model.transform(trainData)
              }
              else {
                sampleData(spark, trainData, samplingMethod)
@@ -365,6 +373,7 @@ object Sampling {
              // sampledData.show
 
              println("new total count: " + sampledData.count())
+             getCountsByClass(spark, "label", sampledData).show
 
              val t1 = System.nanoTime()
 
