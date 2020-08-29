@@ -1,6 +1,11 @@
 package org.apache.spark.ml.sampling
 
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.ml.{Estimator, Model}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 
 
 /*
@@ -137,9 +142,57 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 
  */
 
-class SOMO {
-  def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
-    dfIn
+
+
+/** Transformer Parameters*/
+private[ml] trait SOMOModelParams extends Params with HasFeaturesCol with HasInputCols {
+
+}
+
+/** Transformer */
+class SOMOModel private[ml](override val uid: String) extends Model[SOMOModel] with SOMOModelParams {
+  def this() = this(Identifiable.randomUID("classBalancer"))
+
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    dataset.toDF()
   }
+
+  override def transformSchema(schema: StructType): StructType = {
+    schema
+  }
+
+  override def copy(extra: ParamMap): SOMOModel = {
+    val copied = new SOMOModel(uid)
+    copyValues(copied, extra).setParent(parent)
+  }
+
+}
+
+
+
+
+/** Estimator Parameters*/
+private[ml] trait SOMOParams extends SOMOModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class SOMO(override val uid: String) extends Estimator[SOMOModel] with SOMOParams {
+  def this() = this(Identifiable.randomUID("sampling"))
+
+  override def fit(dataset: Dataset[_]): SOMOModel = {
+    val model = new SOMOModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): SOMO = defaultCopy(extra)
 
 }

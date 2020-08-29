@@ -1,9 +1,12 @@
 package org.apache.spark.ml.sampling
 
 import com.sun.corba.se.impl.oa.toa.TransientObjectManager
+import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.{getCountsByClass, getMatchingClassCount}
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
@@ -14,30 +17,26 @@ import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.sql.functions._
 import org.apache.spark.ml.sampling.utils.pointDifference
+import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.types.StructType
 
-class MWNOTE {
 
+/** Transformer Parameters*/
+private[ml] trait MWMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
 
-  /*val getSafeNeighborCount = udf((array: mutable.WrappedArray[Int], minorityClassLabel: Int) => {
-    def isMajorityNeighbor(x1: Int, x2: Int): Int = {
-      if(x1 == x2) {
-        1
-      } else {
-        0
-      }
-    }
-    array.tail.map(x=>isMajorityNeighbor(minorityClassLabel, x)).sum
-  })*/
+}
+
+/** Transformer */
+class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEModel] with MWMOTEModelParams {
+  def this() = this(Identifiable.randomUID("classBalancer"))
 
   def explodeNeighbors(labels: mutable.WrappedArray[Int], features: mutable.WrappedArray[DenseVector]): Array[(Int, DenseVector)] = {
     val len = labels.length
     (1 until len).map(x=>(labels(x), features(x))).toArray
     //(0 until len).map(x=>features(x)).toArray
   }
-
-
-
+  
   def calculateDensityFactor(y: DenseVector, x: DenseVector): Double = {
 
     0.0
@@ -49,8 +48,9 @@ class MWNOTE {
   }
 
 
-  def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
-    val df = dfIn
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val df = dataset.toDF
+    val spark = df.sparkSession
     import spark.implicits._
 
     val counts = getCountsByClass(spark, "label", df).sort("_2")
@@ -181,7 +181,7 @@ class MWNOTE {
         } else {
           Cf_th
         }
-         (numerator / Cf_th) * CMAX
+        (numerator / Cf_th) * CMAX
       }
 
       SiminCollected.map(x=>calculateClosenessFactor(majorityExample, x, majorityExample.size)).sorted
@@ -247,57 +247,57 @@ class MWNOTE {
 
     // For all examples to generate:
 
-      /* a */
-      // Select a sample x from Simin according to probability distribution fS p ðx i Þg. Let, x is a member of the cluster Lk, 1 <= k <= M.
-      // ** take example from Simin based on probability density
-      // ** transform example, find cluster number
+    /* a */
+    // Select a sample x from Simin according to probability distribution fS p ðx i Þg. Let, x is a member of the cluster Lk, 1 <= k <= M.
+    // ** take example from Simin based on probability density
+    // ** transform example, find cluster number
 
-      def generateExample(): (Long, Int, DenseVector) = {
-        // FIXME - need to redo collection/indexing of Simin
+    def generateExample(): (Long, Int, DenseVector) = {
+      // FIXME - need to redo collection/indexing of Simin
 
-        // FIXME - change how this works with collected values
-        val randomSamplesX = SiminKMeansClusters.filter(SiminKMeansClusters("prediction") === Random.nextInt(clusterKValue))
-        println("count: " + randomSamplesX.count())
+      // FIXME - change how this works with collected values
+      val randomSamplesX = SiminKMeansClusters.filter(SiminKMeansClusters("prediction") === Random.nextInt(clusterKValue))
+      println("count: " + randomSamplesX.count())
 
-        val randomSamples = if(randomSamplesX.count() > 50) {
-          randomSamplesX.sample(false, 0.1).take(2) // FIXME
-        } else {
-          randomSamplesX.sample(false, 1.0).take(2)
-        }
-
-        //println("take: " + randomSamples.length)
-        val xSample = randomSamples(0)(1).asInstanceOf[DenseVector]
-        //println(xSample)
-
-        /* b */
-        // Select another sample y, at random, from the members of the cluster Lk
-        // ** pick random from cluster with previous cluster nunber
-        val ySample = randomSamples(1)(1).asInstanceOf[DenseVector]
-       // println(ySample)
-        /* c */
-        // Generate one synthetic data, s, according to s = x + a * (y - x), where a is a random number in range[0,1]
-        // ** simple
-
-        val alpha = Random.nextDouble()
-        val synthetic = Array(xSample.toArray, ySample.toArray).transpose.map(x=> x(0) + alpha * (x(1) - x(0)))
-        //println(synthetic)
-
-        (0L, randomSamples(0)(0).toString.toInt, Vectors.dense(synthetic).toDense)
-
-        /* d */
-        // Add s to Somin : Somin = Somin U {s}
-        // ** simple
+      val randomSamples = if(randomSamplesX.count() > 50) {
+        randomSamplesX.sample(false, 0.1).take(2) // FIXME
+      } else {
+        randomSamplesX.sample(false, 1.0).take(2)
       }
 
-      // val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample()) // FIXME - super slow, change method
-      val syntheticExamples = (0 until 1).map(_=>generateExample())
-      println("example count " + syntheticExamples.length)
+      //println("take: " + randomSamples.length)
+      val xSample = randomSamples(0)(1).asInstanceOf[DenseVector]
+      //println(xSample)
+
+      /* b */
+      // Select another sample y, at random, from the members of the cluster Lk
+      // ** pick random from cluster with previous cluster nunber
+      val ySample = randomSamples(1)(1).asInstanceOf[DenseVector]
+      // println(ySample)
+      /* c */
+      // Generate one synthetic data, s, according to s = x + a * (y - x), where a is a random number in range[0,1]
+      // ** simple
+
+      val alpha = Random.nextDouble()
+      val synthetic = Array(xSample.toArray, ySample.toArray).transpose.map(x=> x(0) + alpha * (x(1) - x(0)))
+      //println(synthetic)
+
+      (0L, randomSamples(0)(0).toString.toInt, Vectors.dense(synthetic).toDense)
+
+      /* d */
+      // Add s to Somin : Somin = Somin U {s}
+      // ** simple
+    }
+
+    // val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample()) // FIXME - super slow, change method
+    val syntheticExamples = (0 until 1).map(_=>generateExample())
+    println("example count " + syntheticExamples.length)
     import spark.implicits._
     import df.sparkSession.implicits._
     val syntheticDF = spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
-    .withColumnRenamed("_1","index")
-    .withColumnRenamed("_2","label")
-    .withColumnRenamed("_3","features").sort("index")
+      .withColumnRenamed("_1","index")
+      .withColumnRenamed("_2","label")
+      .withColumnRenamed("_3","features").sort("index")
 
     df.show()
     syntheticDF.show
@@ -307,5 +307,42 @@ class MWNOTE {
 
     df.union(syntheticDF)
   }
+
+  override def transformSchema(schema: StructType): StructType = {
+    schema
+  }
+
+  override def copy(extra: ParamMap): MWMOTEModel = {
+    val copied = new MWMOTEModel(uid)
+    copyValues(copied, extra).setParent(parent)
+  }
+
+}
+
+
+
+
+/** Estimator Parameters*/
+private[ml] trait MWMOTEParams extends MWMOTEModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class MWMOTE(override val uid: String) extends Estimator[MWMOTEModel] with MWMOTEParams {
+  def this() = this(Identifiable.randomUID("sampling"))
+
+  override def fit(dataset: Dataset[_]): MWMOTEModel = {
+    val model = new MWMOTEModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): MWMOTE = defaultCopy(extra)
 
 }

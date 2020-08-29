@@ -1,18 +1,31 @@
 package org.apache.spark.ml.sampling
 
-import org.apache.spark.ml.knn.KNN
+import org.apache.spark.ml.{Estimator, Model}
+import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{desc, udf}
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
 import scala.collection.mutable
 import scala.util.Random
-
 import org.apache.spark.ml.sampling.utils._
+import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.sql.types.StructType
 
 
-class BorderlineSmote {
+
+
+/** Transformer Parameters*/
+private[ml] trait BorderlineSMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
+
+}
+
+/** Transformer */
+class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[BorderlineSMOTEModel] with BorderlineSMOTEModelParams {
+  def this() = this(Identifiable.randomUID("borderlineSmote"))
 
   /*************************************************/
   /************borderline SMOTE*****************/
@@ -31,22 +44,44 @@ class BorderlineSmote {
   })
 
 
-  def borderlineSmote1(spark: SparkSession, dfIn: DataFrame): DataFrame = {
+  /*def borderlineSmote1(spark: SparkSession, dfIn: DataFrame): DataFrame = {
     borderlineSmote(spark, dfIn, 1)
   }
 
   def borderlineSmote2(spark: SparkSession, dfIn: DataFrame): DataFrame = {
     borderlineSmote(spark, dfIn, 2)
+  }*/
+  
+  val getLabel = udf((neighbors: Seq[Row]) => scala.util.Try(
+    neighbors.map(_.getAs[Int]("label"))
+  ).toOption)
+
+
+  def getNewSample(current: DenseVector, i: DenseVector, range: Double) : DenseVector = {
+    val xx: Array[Array[Double]] = Array(current.values, i.values)
+    val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * range * (x(1)-x(0)))
+    Vectors.dense(sample).toDense
   }
 
-  def borderlineSmote(spark: SparkSession, dfIn: DataFrame, mode: Int): DataFrame = {
-    import spark.implicits._
+  def generateSamples(neighbors: Seq[DenseVector], s: Int, range: Double, label: Int): Array[Row] = {
 
-    val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
+    val current = neighbors.head
+    val selected: Seq[DenseVector] = Random.shuffle(neighbors.tail).take(s)
+    val rows = selected.map(x=>getNewSample(current, x, range)).map(x=>Row(0, label, x))
+    rows.toArray
+  }
+  
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val mode = 1 // FIXME - add parameter
+    
+    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+    import df.sparkSession.implicits._
+
     val m = 5   // k-value
     val leafSize = 1000
 
-    val counts = getCountsByClass(spark, "label", df).sort("_2")
+    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
     val minClassLabel = counts.take(1)(0)(0).toString
     val minClassCount = counts.take(1)(0)(1).toString.toInt
     val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
@@ -153,7 +188,7 @@ class BorderlineSmote {
     println("foo: " + fooX.length)
 
     val foo: Array[(Long, Int, DenseVector)] = fooX.map(x=>x.toSeq).map(x=>(x.head.toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector]))
-    val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
+    val bar = df.sparkSession.createDataFrame(df.sparkSession.sparkContext.parallelize(foo))
     val bar2 = bar.withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
@@ -173,24 +208,41 @@ class BorderlineSmote {
     all
   }
 
-  val getLabel = udf((neighbors: Seq[Row]) => scala.util.Try(
-    neighbors.map(_.getAs[Int]("label"))
-  ).toOption)
-
-
-  def getNewSample(current: DenseVector, i: DenseVector, range: Double) : DenseVector = {
-    val xx: Array[Array[Double]] = Array(current.values, i.values)
-    val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * range * (x(1)-x(0)))
-    Vectors.dense(sample).toDense
+  override def transformSchema(schema: StructType): StructType = {
+    schema
   }
 
-  def generateSamples(neighbors: Seq[DenseVector], s: Int, range: Double, label: Int): Array[Row] = {
-
-    val current = neighbors.head
-    val selected: Seq[DenseVector] = Random.shuffle(neighbors.tail).take(s)
-    val rows = selected.map(x=>getNewSample(current, x, range)).map(x=>Row(0, label, x))
-    rows.toArray
+  override def copy(extra: ParamMap): BorderlineSMOTEModel = {
+    val copied = new BorderlineSMOTEModel(uid)
+    copyValues(copied, extra).setParent(parent)
   }
 
+}
+
+
+
+
+/** Estimator Parameters*/
+private[ml] trait BorderlineSMOTEParams extends BorderlineSMOTEModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class BorderlineSMOTE(override val uid: String) extends Estimator[BorderlineSMOTEModel] with BorderlineSMOTEParams {
+  def this() = this(Identifiable.randomUID("sampling"))
+
+  override def fit(dataset: Dataset[_]): BorderlineSMOTEModel = {
+    val model = new BorderlineSMOTEModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): BorderlineSMOTE = defaultCopy(extra)
 
 }

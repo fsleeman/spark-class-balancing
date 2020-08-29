@@ -1,9 +1,14 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.KNN
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
+import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.desc
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 
 
 /*
@@ -126,12 +131,23 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
  */
 
 
-class ANS {
 
-  def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
+
+/** Transformer Parameters*/
+private[ml] trait ANSModelParams extends Params with HasFeaturesCol with HasInputCols {
+
+}
+
+/** Transformer */
+class ANSModel private[ml](override val uid: String) extends Model[ANSModel] with ANSModelParams {
+  def this() = this(Identifiable.randomUID("classBalancer"))
+
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    
+    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+    val spark = df.sparkSession
     import spark.implicits._
-
-    val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
     val counts = getCountsByClass(spark, "label", df).sort("_2")
     val minClassLabel = counts.take(1)(0)(0).toString
     val minClassCount = counts.take(1)(0)(1).toString.toInt
@@ -160,27 +176,63 @@ class ANS {
     neighbors.show()
     neighbors.printSchema()
 
-  /*
-  # finding the first minority neighbor of minority samples
-        nn= NearestNeighbors(n_neighbors= 2, n_jobs= self.n_jobs)
-        nn.fit(X_min)
-        dist, ind= nn.kneighbors(X_min)
+    /*
+    # finding the first minority neighbor of minority samples
+          nn= NearestNeighbors(n_neighbors= 2, n_jobs= self.n_jobs)
+          nn.fit(X_min)
+          dist, ind= nn.kneighbors(X_min)
+  
+          # extracting the distances of first minority neighbors from minority samples
+          first_pos_neighbor_distances= dist[:,1]
+  
+    # extracting the number of majority samples in the neighborhood of minority samples
+          out_border= []
+          for i in range(len(X_min)):
+              ind= nn.radius_neighbors(X_min[i].reshape(1, -1), first_pos_neighbor_distances[i], return_distance= False)
+              out_border.append(np.sum(y[ind[0]] == self.majority_label))
+  
+          out_border= np.array(out_border)
+  
+   */
 
-        # extracting the distances of first minority neighbors from minority samples
-        first_pos_neighbor_distances= dist[:,1]
 
-  # extracting the number of majority samples in the neighborhood of minority samples
-        out_border= []
-        for i in range(len(X_min)):
-            ind= nn.radius_neighbors(X_min[i].reshape(1, -1), first_pos_neighbor_distances[i], return_distance= False)
-            out_border.append(np.sum(y[ind[0]] == self.majority_label))
+    dataset.toDF
+  }
 
-        out_border= np.array(out_border)
+  override def transformSchema(schema: StructType): StructType = {
+    schema
+  }
 
- */
-
-
-    dfIn
+  override def copy(extra: ParamMap): ANSModel = {
+    val copied = new ANSModel(uid)
+    copyValues(copied, extra).setParent(parent)
   }
 
 }
+
+
+/** Estimator Parameters*/
+private[ml] trait ANSParams extends ANSModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class ANS(override val uid: String) extends Estimator[ANSModel] with ANSParams {
+  def this() = this(Identifiable.randomUID("sampling"))
+
+  override def fit(dataset: Dataset[_]): ANSModel = {
+    val model = new ANSModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): ANS = defaultCopy(extra)
+
+}
+

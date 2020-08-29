@@ -1,130 +1,32 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
+import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{desc, udf}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
 import scala.collection.mutable
 
-/*
-      def sample(self, X, y):
-        """
-        Does the sample generation according to the class paramters.
-
-        Args:
-            X (np.ndarray): training set
-            y (np.array): target labels
-
-        Returns:
-            (np.ndarray, np.array): the extended training set and target labels
-        """
-        _logger.info(self.__class__.__name__ + ": " +"Running sampling via %s" % self.descriptor())
-
-        self.class_label_statistics(X, y)
-
-        num_to_sample= self.number_of_instances_to_sample(self.proportion, self.class_stats[self.majority_label], self.class_stats[self.minority_label])
-
-        if num_to_sample == 0:
-            _logger.warning(self.__class__.__name__ + ": " + "Sampling is not needed")
-            return X.copy(), y.copy()
-
-        def taxicab_sample(n, r): /// FIXME - wut
-            sample = []
-            random_numbers= self.random_state.rand(n)
-
-            for i in range(n):
-                #spread = r - np.sum(np.abs(sample))
-                spread= r
-                if len(sample) > 0:
-                    spread-= abs(sample[-1])
-                sample.append(spread * (2 * random_numbers[i] - 1))
-
-            return self.random_state.permutation(sample)
-
-        minority= X[y == self.minority_label]
-        majority= X[y == self.majority_label]
-
-        energy = self.energy * (X.shape[1] ** self.scaling)
-
-        distances= pairwise_distances(minority, majority, metric='l1')
-
-        radii = np.zeros(len(minority))
-        translations = np.zeros(majority.shape)
-
-        for i in range(len(minority)):
-            minority_point= minority[i]
-            remaining_energy= energy
-            r= 0.0
-            sorted_distances= np.argsort(distances[i])
-            current_majority= 0
-
-            while True:
-                if current_majority > len(majority):
-                    break
-
-                if current_majority == len(majority):
-                    if current_majority == 0:
-                        radius_change= remaining_energy / (current_majority + 1.0)
-                    else:
-                        radius_change= remaining_energy / current_majority
-
-                    r+= radius_change
-                    break
-
-                radius_change= remaining_energy / (current_majority + 1.0)
-
-                if distances[i, sorted_distances[current_majority]] >= r + radius_change:
-                    r+= radius_change
-                    break
-                else:
-                    if current_majority == 0:
-                        last_distance= 0.0
-                    else:
-                        last_distance= distances[i, sorted_distances[current_majority - 1]]
-
-                    radius_change= distances[i, sorted_distances[current_majority]] - last_distance
-                    r+= radius_change
-                    remaining_energy-= radius_change * (current_majority + 1.0)
-                    current_majority+= 1
-
-            radii[i] = r
-
-            for j in range(current_majority):
-                majority_point= majority[sorted_distances[j]].astype(float)
-                d = distances[i, sorted_distances[j]]
-
-                if d < 1e-20:
-                    majority_point+= (1e-6 * self.random_state.rand(len(majority_point)) + 1e-6) * self.random_state.choice([-1.0, 1.0], len(majority_point))
-                    d = np.sum(np.abs(minority_point - majority_point))
-
-                translation = (r - d) / d * (majority_point - minority_point)
-                translations[sorted_distances[j]] += translation
-
-        majority= majority.astype(float)
-        majority += translations
-
-        appended= []
-        for i in range(len(minority)):
-            minority_point = minority[i]
-            synthetic_samples = int(np.round(1.0 / (radii[i] * np.sum(1.0 / radii)) * num_to_sample))
-            r = radii[i]
-
-            for _ in range(synthetic_samples):
-                appended.append(minority_point + taxicab_sample(len(minority_point), r))
-
-        if len(appended) == 0:
-            _logger.info("No samples were added")
-            return X.copy(), y.copy()
-
-
- */
 
 
 
-class CCR {
+
+
+/** Transformer Parameters*/
+private[ml] trait CCRModelParams extends Params with HasFeaturesCol with HasInputCols {
+
+}
+
+/** Transformer */
+class CCRModel private[ml](override val uid: String) extends Model[CCRModel] with CCRModelParams {
+  def this() = this(Identifiable.randomUID("ccr"))
 
   type Element = (Int, Array[Double])
   type Element2 = (Long, Int, Array[Double])
@@ -135,7 +37,7 @@ class CCR {
   }
 
   val moveMajorityPoints2: UserDefinedFunction = udf((features: DenseVector, neighborIndices: mutable.WrappedArray[Long],
-                                                     neighborLabels: mutable.WrappedArray[Int], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
+                                                      neighborLabels: mutable.WrappedArray[Int], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
 
     val majorityIndicies: Array[Long] = neighborIndices.toArray
     val majorityLabels: Array[Int] = neighborLabels.toArray
@@ -151,7 +53,7 @@ class CCR {
     type MajorityPoint = (Long, Int, Array[Double])
 
     def getMovedNeighbors(j: Int): (Boolean, (Long, Int, Array[Double])) ={
-       println("^^^ " + distances(j) + " " + ri)
+      println("^^^ " + distances(j) + " " + ri)
       if(distances(j) <= ri) {
         // println("@@", distances(j), ri)
         val d = pointDistance(features.toArray, majorityNeighbors(j))
@@ -174,8 +76,8 @@ class CCR {
     //val xxx = combinedMajoritNeighbors.filter(x=>x._1)
     //print(xxx.length)
     //for(x<-xxx) {
-     // println(x)
-   // }
+    // println(x)
+    // }
 
     //print("***** " + combinedMajoritNeighbors.length)
 
@@ -186,7 +88,7 @@ class CCR {
   })
 
   val moveMajorityPoints: UserDefinedFunction = udf((features: DenseVector, neighborIndices: mutable.WrappedArray[Long],
-                                        neighborLabels: mutable.WrappedArray[Int], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
+                                                     neighborLabels: mutable.WrappedArray[Int], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
     val majorityIndicies: Array[Long] = neighborIndices.toArray
     val majorityLabels: Array[Int] = neighborLabels.toArray
     val majorityNeighbors: Array[Array[Double]] = neighborFeatures.toArray.map(x=>x.toArray)
@@ -276,33 +178,33 @@ class CCR {
     Math.pow(ri, -1)
 
     // val updatedMajorityRows = Array[Row]()
-/*
-
-    def getMovedNeighbors(j: Int): Array[Row] ={
-      // println("^^^ " + distances(j) + " " + ri)
-      if(distances(j) <= ri) {
-        // println("@@", distances(j), ri)
-        val d = pointDistance(features.toArray, majorityNeighbors(j))
-        // FIXME - check line 19 in algorithm for tj usage
-        val scale =  (ri - d) / d
-        val offset: Array[Double] = Array(features.toArray, majorityNeighbors(j)).transpose.map(x=>x(0) - x(1)).map(x=>x * scale)
-        val updatedPosition = Array(offset, majorityNeighbors(j)).transpose.map(x=>x(0)+x(1))
-
-        Array[Row](Row((majorityIndicies(j), majorityLabels(j), updatedPosition)))
-      } else {
-        Array[Row]()
-      }
-    }
-
-    println("~~~ indicies: " + majorityNeighbors.indices.length)
-    val movedMajoirtyNeigbors = majorityNeighbors.indices.map(j=>getMovedNeighbors(j))
-    val combinedMajoritNeighbors: Array[Row] = movedMajoirtyNeigbors.reduce(_ union _)
-    print(combinedMajoritNeighbors(0))
-    print("***** " + combinedMajoritNeighbors.length)
-
-
-    // return cleaning radius and moved majority points
-  */
+    /*
+    
+        def getMovedNeighbors(j: Int): Array[Row] ={
+          // println("^^^ " + distances(j) + " " + ri)
+          if(distances(j) <= ri) {
+            // println("@@", distances(j), ri)
+            val d = pointDistance(features.toArray, majorityNeighbors(j))
+            // FIXME - check line 19 in algorithm for tj usage
+            val scale =  (ri - d) / d
+            val offset: Array[Double] = Array(features.toArray, majorityNeighbors(j)).transpose.map(x=>x(0) - x(1)).map(x=>x * scale)
+            val updatedPosition = Array(offset, majorityNeighbors(j)).transpose.map(x=>x(0)+x(1))
+    
+            Array[Row](Row((majorityIndicies(j), majorityLabels(j), updatedPosition)))
+          } else {
+            Array[Row]()
+          }
+        }
+    
+        println("~~~ indicies: " + majorityNeighbors.indices.length)
+        val movedMajoirtyNeigbors = majorityNeighbors.indices.map(j=>getMovedNeighbors(j))
+        val combinedMajoritNeighbors: Array[Row] = movedMajoirtyNeigbors.reduce(_ union _)
+        print(combinedMajoritNeighbors(0))
+        print("***** " + combinedMajoritNeighbors.length)
+    
+    
+        // return cleaning radius and moved majority points
+      */
   })
 
 
@@ -323,13 +225,16 @@ class CCR {
   }
 
 
-  def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
-    import spark.implicits._
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    
 
     // parameters
     // proportion = 1.0, energy = 1.0, scaling = 0.0
 
-    val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
+    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+    val spark = df.sparkSession
+    import spark.implicits._
+    
     val counts = getCountsByClass(spark, "label", df).sort("_2")
     val minClassLabel = counts.take(1)(0)(0).toString
     val minClassCount = counts.take(1)(0)(1).toString.toInt
@@ -523,19 +428,19 @@ class CCR {
 
     }*/
 
-            /*for((key,language) <- grouped){
-          println(count + " -> " + language)
+    /*for((key,language) <- grouped){
+  println(count + " -> " + language)
 
-        }
+}
 
-        val taken = grouped.keys.foreach( (s) =>
-          println( "x" + s)
+val taken = grouped.keys.foreach( (s) =>
+  println( "x" + s)
 
-        )*/
+)*/
 
 
 
-//  def extractMovedPoints(indices: Array[Long], labels: Array[Int], features: Array[Array[Double]]): Int ={
+    //  def extractMovedPoints(indices: Array[Long], labels: Array[Int], features: Array[Array[Double]]): Int ={
 
     /*val fooX = movedPointsCollected.map(x=>x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray)
     println(fooX(0).toVector)
@@ -558,4 +463,42 @@ class CCR {
     finalDF
   }
 
+  override def transformSchema(schema: StructType): StructType = {
+    schema
+  }
+
+  override def copy(extra: ParamMap): CCRModel = {
+    val copied = new CCRModel(uid)
+    copyValues(copied, extra).setParent(parent)
+  }
+
 }
+
+
+
+
+/** Estimator Parameters*/
+private[ml] trait CCRParams extends CCRModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class CCR(override val uid: String) extends Estimator[CCRModel] with CCRParams {
+  def this() = this(Identifiable.randomUID("ccr"))
+
+  override def fit(dataset: Dataset[_]): CCRModel = {
+    val model = new CCRModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): CCR = defaultCopy(extra)
+
+}
+

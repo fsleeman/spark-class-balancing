@@ -2,71 +2,32 @@ package org.apache.spark.ml.sampling
 
 import breeze.stats.distributions.Gaussian
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.RamDiskReplicaLruTracker
+import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
+import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.desc
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
 import scala.collection.mutable
 import scala.util.Random
 // import org.apache.commons.math3.analysis.function.Gaussian
-/*
-   """
-        Generates reasonable paramter combinations.
-
-        Returns:
-            list(dict): a list of meaningful paramter combinations
 
 
-   def sample(self, X, y):
-        """
-        Does the sample generation according to the class paramters.
-
-        Args:
-            X (np.ndarray): training set
-            y (np.array): target labels
-
-        Returns:
-            (np.ndarray, np.array): the extended training set and target labels
-        """
-        _logger.info(self.__class__.__name__ + ": " +"Running sampling via %s" % self.descriptor())
-
-        self.class_label_statistics(X, y)
-
-        if self.class_stats[self.minority_label] < 2:
-            _logger.warning(self.__class__.__name__ + ": " + "The number of minority samples (%d) is not enough for sampling" % self.class_stats[self.minority_label])
-            return X.copy(), y.copy()
-
-        num_to_sample= self.number_of_instances_to_sample(self.proportion, self.class_stats[self.majority_label], self.class_stats[self.minority_label])
-
-        if num_to_sample == 0:
-            _logger.warning(self.__class__.__name__ + ": " + "Sampling is not needed")
-            return X.copy(), y.copy()
-
-        # standardization applied to make sigma compatible with the data
-        ss= StandardScaler()
-        X_ss= ss.fit_transform(X)
-
-        # fitting nearest neighbors model to find the minority neighbors of minority samples
-        X_min= X_ss[y == self.minority_label]
-        nn= NearestNeighbors(n_neighbors= min([len(X_min), self.n_neighbors + 1]), n_jobs= self.n_jobs)
-        nn.fit(X_min)
-        dist, ind= nn.kneighbors(X_min)
-
-        # do the sampling
-        samples= []
-        while len(samples) < num_to_sample:
-            idx= self.random_state.randint(len(X_min))
-            random_neighbor= self.random_state.choice(ind[idx][1:])
-            s0= self.sample_between_points(X_min[idx], X_min[random_neighbor])
-            samples.append(self.random_state.normal(s0, self.sigma))
-
- */
 
 
-// FIXME - check normalization/scaling
-class Gaussian_SMOTE {
+/** Transformer Parameters*/
+private[ml] trait GaussianSMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
+
+}
+
+/** Transformer */
+class GaussianSMOTEModel private[ml](override val uid: String) extends Model[GaussianSMOTEModel] with GaussianSMOTEModelParams {
+  def this() = this(Identifiable.randomUID("classBalancer"))
 
   def getSingleDistance(x: Array[Double], y: Array[Double]): Double = {
     var distance = 0.0
@@ -97,12 +58,10 @@ class Gaussian_SMOTE {
     Row(index, label, syntheticExample)
   }
 
-
-  def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
-
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+    val spark = df.sparkSession
     import spark.implicits._
-
-    val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
     val m = 5   // k-value
     val leafSize = 1000
 
@@ -143,7 +102,44 @@ class Gaussian_SMOTE {
     println(gauss.draw())
     println(gauss.draw())
 
-
-    dfIn
+    df // FIXME
   }
+
+  override def transformSchema(schema: StructType): StructType = {
+    schema
+  }
+
+  override def copy(extra: ParamMap): GaussianSMOTEModel = {
+    val copied = new GaussianSMOTEModel(uid)
+    copyValues(copied, extra).setParent(parent)
+  }
+
+}
+
+
+
+
+/** Estimator Parameters*/
+private[ml] trait GaussianSMOTEParams extends GaussianSMOTEModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class GaussianSMOTE(override val uid: String) extends Estimator[GaussianSMOTEModel] with GaussianSMOTEParams {
+  def this() = this(Identifiable.randomUID("sampling"))
+
+  override def fit(dataset: Dataset[_]): GaussianSMOTEModel = {
+    val model = new GaussianSMOTEModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): GaussianSMOTE = defaultCopy(extra)
+
 }

@@ -1,6 +1,11 @@
 package org.apache.spark.ml.sampling
 
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.ml.{Estimator, Model}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 
 /*
 
@@ -88,10 +93,56 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 
 
 
-class NRAS {
 
-  def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
-    dfIn
+/** Transformer Parameters*/
+private[ml] trait NRASModelParams extends Params with HasFeaturesCol with HasInputCols {
+
+}
+
+/** Transformer */
+class NRASModel private[ml](override val uid: String) extends Model[NRASModel] with NRASModelParams {
+  def this() = this(Identifiable.randomUID("classBalancer"))
+
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    dataset.toDF()
   }
+
+  override def transformSchema(schema: StructType): StructType = {
+    schema
+  }
+
+  override def copy(extra: ParamMap): NRASModel = {
+    val copied = new NRASModel(uid)
+    copyValues(copied, extra).setParent(parent)
+  }
+
+}
+
+
+
+
+/** Estimator Parameters*/
+private[ml] trait NRASParams extends NRASModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class NRAS(override val uid: String) extends Estimator[NRASModel] with NRASParams {
+  def this() = this(Identifiable.randomUID("sampling"))
+
+  override def fit(dataset: Dataset[_]): NRASModel = {
+    val model = new NRASModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): NRAS = defaultCopy(extra)
 
 }

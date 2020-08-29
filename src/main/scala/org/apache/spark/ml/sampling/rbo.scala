@@ -1,14 +1,29 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
+import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.desc
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
 import scala.collection.mutable
 import scala.util.Random
 
-class rbo {
+
+
+
+/** Transformer Parameters*/
+private[ml] trait RBOModelParams extends Params with HasFeaturesCol with HasInputCols {
+
+}
+
+/** Transformer */
+class RBOModel private[ml](override val uid: String) extends Model[RBOModel] with RBOModelParams {
+  def this() = this(Identifiable.randomUID("classBalancer"))
 
   def pointDifference(x1: Array[Double], x2: Array[Double]): Double = {
     val combined = Array[Array[Double]](x1, x2)
@@ -59,8 +74,9 @@ class rbo {
     Vectors.dense(point).toDense
   }
 
-  def fit(spark: SparkSession, dfIn: DataFrame, k: Int): DataFrame = {
-    val df = dfIn
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val df = dataset.toDF
+    val spark = df.sparkSession
     val counts = getCountsByClass(spark, "label", df).sort("_2")
     val minClassLabel = counts.take(1)(0)(0).toString
     val minClassCount = counts.take(1)(0)(1).toString.toInt
@@ -97,4 +113,42 @@ class rbo {
 
     all
   }
+
+  override def transformSchema(schema: StructType): StructType = {
+    schema
+  }
+
+  override def copy(extra: ParamMap): RBOModel = {
+    val copied = new RBOModel(uid)
+    copyValues(copied, extra).setParent(parent)
+  }
+
+}
+
+
+
+
+/** Estimator Parameters*/
+private[ml] trait RBOParams extends RBOModelParams with HasSeed {
+
+  protected def validateAndTransformSchema(schema: StructType): StructType = {
+    schema
+  }
+}
+
+/** Estimator */
+class RBO(override val uid: String) extends Estimator[RBOModel] with RBOParams {
+  def this() = this(Identifiable.randomUID("sampling"))
+
+  override def fit(dataset: Dataset[_]): RBOModel = {
+    val model = new RBOModel(uid).setParent(this)
+    copyValues(model)
+  }
+
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
+
+  override def copy(extra: ParamMap): RBO = defaultCopy(extra)
+
 }
