@@ -12,7 +12,7 @@ import org.apache.spark.sql.functions.{col, desc, udf}
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.ml.sampling.Sampling._
-
+import scala.collection.mutable
 import org.apache.spark.mllib.linalg.MatrixImplicits._
 import org.apache.spark.mllib.linalg.VectorImplicits._
 
@@ -125,6 +125,7 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     println("at sparsitiy count " + data.count())
     // data.show()
     data.printSchema()
+    // FIXME - use dataset schema access method
     val collected: Array[Array[Double]] =  data.withColumn("features", toArrUdf(col("features"))).select("features").collect().map(x=>x.toString.substring(14, x.toString.length-2).split(",").map(x=>x.toDouble))
     val n = collected.length // number of minority examples in cluster
     val m = collected(0).length // number of features
@@ -145,17 +146,57 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
   private def getImbalancedRatio(spark: SparkSession, data: Dataset[Row], minClassLabel: String): Double = {
     val minorityCount = data.filter(data("label") === minClassLabel).count
     val majorityCount = data.filter(data("label") =!= minClassLabel).count
-    (minorityCount + 1) / (majorityCount + 1).toDouble
+    // (minorityCount + 1) / (majorityCount + 1).toDouble
+    (majorityCount + 1) / (minorityCount + 1).toDouble
+  }
+
+  private def getInstanceAverageDistance(vector: Array[Double], vectors: Array[Array[Double]]): Double ={
+    vectors.map(x=>getSingleDistance(vector, x)).sum / (vectors.length - 1)
+  }
+
+  private def getAverageDistance(df: DataFrame): Double ={
+    val collected = df.select("features").collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)
+    collected.map(x=>getInstanceAverageDistance(x, collected)).sum / collected.length.toDouble
+  }
+
+
+
+  def sampleCluster(df: DataFrame, samplesToAdd: Int): DataFrame ={
+    println("to add: " + samplesToAdd)
+    if(df.count > 1) {
+      val r = new SMOTE // multi-class done
+      val model = r.fit(df)
+      val x = model.oversample(df, samplesToAdd)
+      println("count: " + x.count())
+      println(model.uid)
+      x
+    } else {
+      df
+    }
+
+
+    // println("samples to add: " + samplesToAdd)
+    /*val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
+    val bar2 = bar.withColumnRenamed("_1", "index")
+      .withColumnRenamed("_2", "label")
+      .withColumnRenamed("_3", "features")
+*/
+    //df
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
+
+    // FIXME - add de -density parameter, currently auto calculated
     val k = 5 // FIXME
-    val imbalanceRatioThreshold = 1.0 // FIXME - make parameter
+    val imbalanceRatioThreshold = 2.0 // FIXME - make parameter
     val kSmote = 5          // FIXME - make parameter
     // val densityExponent = 10 // FIXME - number of features
     // cluster
 
     val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+
+    val numberOfFeatures = df.select("features").take(1)(0)(0).asInstanceOf[DenseVector].size
+    println("number of Features : " + numberOfFeatures)
     val spark = df.sparkSession
     val counts = getCountsByClass(spark, "label", df).sort("_2")
     val minClassLabel = counts.take(1)(0)(0).toString
@@ -166,21 +207,62 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     val samplesToAdd = maxClassCount - minClassCount
     println("Samples to add: " + samplesToAdd)
 
-    val kmeans = new KMeans().setK(k).setSeed(1L) // FIXME - fix seed
+    // STEP 1
+    val kmeans = new KMeans().setK(kSmote).setSeed(1L) // FIXME - fix seed
     val model = kmeans.fit(df)
     val predictions = model.transform(df)
 
-    // filter
-    val clusters = (0 until k).map(x=>predictions.filter(predictions("prediction")===x)).toArray
+    val clusters = (0 until k).map(x=>predictions.filter(predictions("prediction")===x).drop("prediction")).toArray
 
-    val imbalancedRatios = clusters.map(x=>getImbalancedRatio(spark, x, minClassLabel))
+    val imbalancedRatios: Array[Double] = clusters.map(x=>getImbalancedRatio(spark, x, minClassLabel))
 
+    // FIXME - filter clusters
+    val filteredClusters = (0 until k).map(x=>(imbalancedRatios(x), clusters(x))).filter(x=>x._1 < imbalanceRatioThreshold).map(x=>x._2).map(x=>x.filter(x("label")===minClassLabel))
+    // val filteredClusters = imbalancedClusters.map(x=>x.filter(x("label")===minClassLabel)) // FIXME - change to string column type?
+    val averageDistances = filteredClusters.indices.map(x=>getAverageDistance(filteredClusters(x))).toArray
+    for(x<-averageDistances) {
+      println(x)
+    }
+
+
+    val densities = filteredClusters.indices.map(x=>filteredClusters(x).count / Math.pow(averageDistances(x), numberOfFeatures))
+    val sparsities = densities.indices.map(x=>1/densities(x))
+
+    val clusterWeights = sparsities.indices.map(x=>sparsities(x)/sparsities.sum)
+
+    for(x<-sparsities) {
+      println("sparsities: " + x)
+    }
+    val clusterSamples = clusterWeights.indices.map(x=>(samplesToAdd*clusterWeights(x)).toInt)
+
+    val xxx = df.union(filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).reduce(_ union _))
+    println("total: " + xxx.count)
+    getCountsByClass(df.sparkSession, "label", xxx).show
+
+
+    // STEP 2
+    // 1. For each filtered cluster f , calculate the Euclidean distance matrix, ignoring majority samples.
+    //filteredCluster(0).show
+    //getCountsByClass(df.sparkSession,"label", filteredCluster(0)).show
+
+
+
+
+    // 2. Compute the mean distance within each cluster by summing all non-diagonal elements of the distance matrix, then dividing by the number non-diagonal elements.
+    // 3. To obtain a measure of density, divide each cluster’s number of minority instances by its average minority distance raised count ( f ) to the power of the number of features m : density ( f ) = average minority. minority distance ( f ) m
+    //4. Invert the density measure as to get a measure of sparsity, i.e. sparsity ( f ) = density( f ) .
+    //5. The sampling weight of each cluster is defined as the cluster’s sparsity factor divided by the sum of all clusters’ sparsity factors.
+
+
+    /*
+    // STEP 2
     val sparsity = (0 until k).map(x=>getSparsity(predictions.filter((predictions("prediction")===x)
       && (predictions("label")===minClassLabel)), imbalancedRatios(x)))
     val sparsitySum = sparsity.sum
 
     val classSparsity = (0 until k).map(x=>(x, ((sparsity(x)/sparsitySum) * samplesToAdd).toInt))
 
+    // STEP 3
     var sampledDataset: Array[Row] = Array[Row]()
 
     for(x<-classSparsity) {
@@ -207,7 +289,8 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     println("all: " + all.count())
 
     // over sampling
-    all
+    all*/
+    xxx
   }
 
   override def transformSchema(schema: StructType): StructType = {
