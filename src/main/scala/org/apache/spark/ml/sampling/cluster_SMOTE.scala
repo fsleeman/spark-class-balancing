@@ -37,6 +37,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val bSample = features(Random.nextInt(knnK + 1)).toArray
     val offset = Random.nextDouble()
 
+    /// FIXME - check ALL distance calculations
     Vectors.dense(Array(aSample, bSample).transpose.map(x=>x(0) + offset * (x(1)-x(0)))).toDense
   }
 
@@ -46,7 +47,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
 
     val leafSize = 10 // FIXME
     val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8) /// FIXME - check?
+      .setTopTreeSize(2) /// FIXME - check? // df.count().toInt / 2
       .setTopTreeLeafSize(leafSize)
       .setSubTreeLeafSize(leafSize)
       .setK(knnK + 1) // include self example
@@ -56,7 +57,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
 
     if(model.getBufferSize < 0.0) {
       val model = new KNN().setFeaturesCol("features")
-        .setTopTreeSize(df.count().toInt / 8) /// FIXME - check?
+        .setTopTreeSize(2) /// FIXME - check? df.count().toInt / 8
         .setTopTreeLeafSize(leafSize)
         .setSubTreeLeafSize(leafSize)
         .setBalanceThreshold(0.0) // Fixes issue with smaller clusters
@@ -70,46 +71,52 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     }
   }
 
-  override def transform(dataset: Dataset[_]): DataFrame = {
+  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame ={
     val clusterK = 5 // FIXME
-    
-    val df = dataset.toDF()
-    val spark = df.sparkSession
-    val counts = getCountsByClass(spark, "label", df).sort("_2")
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
-
-    val samplesToAdd = maxClassCount - minClassCount
-
     println("Samples to add: " + samplesToAdd)
+    val spark = dataset.sparkSession
 
-    val minorityDF = df.filter(df("label")===minClassLabel)
+    val minorityDF = dataset.filter(dataset("label")===minorityClassLabel)
 
-    val kValue = Math.min(minClassCount, clusterK)
+    val kValue = clusterK // Math.min(minorityClassLabel.toInt, clusterK)
     val kmeans = new KMeans().setK(kValue).setSeed(1L) // FIXME - fix seed
     val model = kmeans.fit(minorityDF)
     val predictions = model.transform(minorityDF)
 
-    val clusters = (0 until clusterK).map(x=>predictions.filter(predictions("prediction")===x)).toArray
+    val clusters = (0 until clusterK).map(x=>predictions.filter(predictions("prediction")===x)).filter(x=>x.count()>0).toArray
 
     // knn for each cluster
     knnClusters =  clusters.map(x=>calculateKnnByCluster(spark, x).select("label", "neighborFeatures").collect)
     knnClusterCounts = knnClusters.map(x=>x.length)
 
-    val randomIndicies = (0 until samplesToAdd).map(_ => Random.nextInt(clusterK))
-    val addedSamples = randomIndicies.map(x=>(0.toLong, minClassLabel.toInt, createSample(x))).toArray
-
+    val randomIndicies = (0 until samplesToAdd).map(_ => Random.nextInt(clusters.length))
+    val addedSamples = randomIndicies.map(x=>(0.toLong, minorityClassLabel.toInt, createSample(x))).toArray
 
     val dfAddedSamples = spark.createDataFrame(spark.sparkContext.parallelize(addedSamples))
       .withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
 
-    df.printSchema()
+    dataset.printSchema()
     dfAddedSamples.printSchema()
-    df.union(dfAddedSamples)
+    dfAddedSamples
+  }
+
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val df = dataset.toDF()
+
+    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+
+    println("dataset: " + dataset.count)
+    println("added: " + results.count)
+
+    results
   }
 
   override def transformSchema(schema: StructType): StructType = {
