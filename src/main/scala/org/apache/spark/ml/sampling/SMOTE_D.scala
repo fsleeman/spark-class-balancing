@@ -47,7 +47,7 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
 
     //println("************ in function")
 
-    val distancesSum = distances.sum
+    //val distancesSum = distances.sum
     //println("sum: " + distancesSum)
     //println("to add: " + numberToAdd)
 
@@ -78,20 +78,25 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
   }
 
 
-  override def transform(dataset: Dataset[_]): DataFrame = {
-    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame = {
+    val df = dataset.toDF //.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
     val spark = df.sparkSession
+
+    val minorityDF = df.filter(df("label") === minorityClassLabel)
+    val minorityClassCount = minorityDF.count
+
     val counts = getCountsByClass(spark, "label", df).sort("_2")
     import spark.implicits._
-    val minClassLabel = counts.take(1)(0)(0).toString
+    // val minClassLabel = counts.take(1)(0)(0).toString
     val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    // val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+    println("!!!!max count: " + maxClassCount)
 
-    val samplesToAdd = maxClassCount - minClassCount
-    println("Samples to add: " + samplesToAdd)
+    val samplesToAdd = maxClassCount - minorityClassCount
+    println("Samples to add: " + samplesToAdd + " class: " + minorityClassLabel)
 
-    val minorityDF = df.filter(df("label") === minClassLabel)
+
 
     val leafSize = 10 // FIXME
 
@@ -104,8 +109,8 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
 
     val f = model.fit(minorityDF)
     val neighbors = f.transform(minorityDF).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
-    neighbors.show()
-    neighbors.printSchema()
+    //neighbors.show()
+    //neighbors.printSchema()
     // udf for distances
 
     /*val sampleExistingExample =  udf((numberToAdd: Int, distances: scala.collection.mutable.WrappedArray[Double],
@@ -134,33 +139,35 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     })*/
 
     val distances = neighbors.withColumn("distances", calculateDistances(neighbors("neighborFeatures")))
-    distances.show
+    //distances.show
 
     val std = distances.withColumn("std", calculateStd(distances("distances")))
-    std.show
+    ///std.show
 
     val stdSum = std.select("std").collect.map(x=>x(0).toString.toDouble).sum
 
     val stdWeights = std.withColumn("stdWeights", std("std")/stdSum)
-    stdWeights.show
+    //stdWeights.show
 
     val localDistanceWeights = stdWeights.withColumn("localDistanceWeights", calculateLocalDistanceWeights(stdWeights("distances")))
     localDistanceWeights.show
 
     val calculateSamplesToAdd = udf((std: Double, distances: scala.collection.mutable.WrappedArray[Double]) => {
       //distances.indices.map(x=>(std * distances(x) * samplesToAdd))
-      (std * minClassCount.toDouble).toInt
+      //(std * minClassCount.toDouble).toInt
+      (std * samplesToAdd).toInt + 1 // fix for too few values based on rounding
     })
 
     val samplesToAddDF = localDistanceWeights.withColumn("samplesToAdd", calculateSamplesToAdd(localDistanceWeights("stdWeights"), localDistanceWeights("localDistanceWeights")))
-    samplesToAddDF.show
+    //samplesToAddDF.show
     println("samples to add: " + samplesToAdd)
 
 
     // val calcSamplesToAdd = samplesToAddDF.select("samplesToAdd").collect.map(x=>x(0).toString.toDouble).sum
 
-    val sortDF = samplesToAddDF.sort(col("samplesToAdd").desc)
-    sortDF.show
+    //val sortDF = samplesToAddDF.sort(col("samplesToAdd").desc)
+    val sortDF = samplesToAddDF.sort(col("stdWeights").desc)
+    //sortDF.show
     // println(calcSamplesToAdd)
 
     //val partitionWindow = Window.partitionBy($"label").orderBy($"samplesToAdd".desc)
@@ -168,7 +175,8 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
 
     val partitionWindow = Window.partitionBy($"label").orderBy($"samplesToAdd".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     val sumTest = sum($"samplesToAdd").over(partitionWindow)
-    val runningTotals = samplesToAddDF.select($"*", sumTest as "running_total")
+    //val runningTotals = samplesToAddDF.select($"*", sumTest as "running_total")
+    val runningTotals = sortDF.select($"*", sumTest as "running_total")
 
     val w = Window.partitionBy($"label")
       .orderBy($"samplesToAdd")
@@ -180,14 +188,14 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
 
     runningTotals.show(100)
     println(runningTotals.count)
-   val filteredTotals = runningTotals.filter(runningTotals("running_total") <= samplesToAdd) // FIXME - use take if less then amount
+    val filteredTotals = runningTotals.filter(runningTotals("running_total") <= samplesToAdd) // FIXME - use take if less then amount
     println("samples to add: " + samplesToAdd)
     println("~~~~~" + filteredTotals.count)
 
     // val addedSamples: Array[Row] = filteredTotals.withColumn("added", sampleExistingExample(filteredTotals("samplesToAdd"), filteredTotals("distances"), filteredTotals("neighborFeatures"))).select("added").collect
     val addedSamples: Array[Array[Array[Double]]] = filteredTotals.collect.map(x=>sampleExistingExample(x(8).asInstanceOf[Int], x(4).asInstanceOf[mutable.WrappedArray[Double]], x(3).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     println("addedSamples: " + addedSamples.length)
-    val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(0.toLong, minClassLabel.toInt, x))
+    val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(0.toLong, minorityClassLabel.toInt, x))
 
     println(collectedSamples.length)
 
@@ -197,7 +205,30 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
       .withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
 
-    dataset.toDF.union(bar2)
+    //dataset.toDF.union(bar2)
+    bar2
+
+  }
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val df = dataset.toDF()
+    // import df.sparkSession.implicits._
+
+    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
+    // val minClassLabel = counts.take(1)(0)(0).toString
+    // val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    println("!!!! max count: " + majorityClassCount)
+    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+    //val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1=="5")
+    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+
+    println("dataset: " + dataset.count)
+    println("added: " + results.count)
+
+    results
   }
 
   override def transformSchema(schema: StructType): StructType = {
