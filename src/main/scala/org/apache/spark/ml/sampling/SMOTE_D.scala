@@ -10,8 +10,10 @@ import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.ml.sampling.utils.pointDifference
 import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.types.StructType
-
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.sql.functions._
 import scala.collection.mutable
 
 
@@ -20,11 +22,61 @@ private[ml] trait SMOTEDModelParams extends Params with HasFeaturesCol with HasI
 
 }
 
+
 /** Transformer */
 class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDModel] with SMOTEDModelParams {
   def this() = this(Identifiable.randomUID("classBalancer"))
 
   val knnK = 5
+
+  private val calculateDistances: UserDefinedFunction = udf((neighbors: scala.collection.mutable.WrappedArray[DenseVector]) => {
+    (1 until neighbors.length).map(x=>pointDifference(neighbors(0).toArray, neighbors(x).toArray))
+  })
+
+  private val calculateStd: UserDefinedFunction = udf((distances: scala.collection.mutable.WrappedArray[Double]) => {
+    val mean = distances.sum / distances.length.toDouble
+    Math.sqrt(distances.map(x=>Math.pow(x - mean,2)).sum * (1 / (distances.length - 1).toDouble)) /// FIXME - check formula
+  })
+
+  private val calculateLocalDistanceWeights: UserDefinedFunction = udf((distances: scala.collection.mutable.WrappedArray[Double]) => {
+    distances.map(x=>x/distances.sum)
+  })
+
+  private def sampleExistingExample(numberToAdd: Int, distances: scala.collection.mutable.WrappedArray[Double],
+                            neighbors: scala.collection.mutable.WrappedArray[DenseVector]): Array[Array[Double]] ={
+
+    //println("************ in function")
+
+    val distancesSum = distances.sum
+    //println("sum: " + distancesSum)
+    //println("to add: " + numberToAdd)
+
+    val counts = distances.map(x=>((x/ distances.sum) * numberToAdd).toInt + 1).reverse
+
+
+    //for(x<-counts) {
+    //  println(x)
+   // }
+
+    val originalExample = neighbors.head.toArray
+    val reverseNeighbors = neighbors.tail.reverse.map(x=>x.toArray) // furtherest first
+
+    // FIXME - only samples upto the required count
+
+
+    def addOffset(x: Array[Double], distanceLine: Array[Double], offset: Double): Array[Double] = {
+      Array[Array[Double]](x, distanceLine).transpose.map(x=>x(0) + x(1)*offset)
+    }
+
+    def getNeighborSamples(index: Int)= {
+      val distanceLine: Array[Double] = Array[Array[Double]](originalExample, reverseNeighbors(index)).transpose.map(x=>x(1)-x(0))
+      (0 until counts(index)).map(x=>addOffset(originalExample, distanceLine, (x + 1)/(counts(index) + 1).toDouble))
+    }
+
+    val x: Seq[IndexedSeq[Array[Double]]] = reverseNeighbors.indices.map(x=>getNeighborSamples(x))
+    x.reduce(_ union _).toArray.take(numberToAdd)
+  }
+
 
   override def transform(dataset: Dataset[_]): DataFrame = {
     val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
@@ -56,24 +108,6 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     neighbors.printSchema()
     // udf for distances
 
-    val calculateDistances = udf((neighbors: scala.collection.mutable.WrappedArray[DenseVector]) => {
-      (1 until neighbors.length).map(x=>pointDifference(neighbors(0).toArray, neighbors(x).toArray))
-    })
-
-    val calculateStd = udf((distances: scala.collection.mutable.WrappedArray[Double]) => {
-      val mean = distances.sum / distances.length.toDouble
-      Math.sqrt(distances.map(x=>Math.pow(x - mean,2)).sum * (1 / (distances.length - 1).toDouble)) /// FIXME - check formula
-    })
-
-    val calculateLocalDistanceWeights = udf((distances: scala.collection.mutable.WrappedArray[Double]) => {
-      distances.map(x=>x/distances.sum)
-    })
-
-    val calculateSamplesToAdd = udf((std: Double, distances: scala.collection.mutable.WrappedArray[Double]) => {
-      //distances.indices.map(x=>(std * distances(x) * samplesToAdd))
-      (std * minClassCount.toDouble).toInt
-    })
-
     /*val sampleExistingExample =  udf((numberToAdd: Int, distances: scala.collection.mutable.WrappedArray[Double],
                                       neighbors: scala.collection.mutable.WrappedArray[DenseVector]) => {
 
@@ -99,32 +133,6 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
       x.reduce(_ union _).toArray
     })*/
 
-    def sampleExistingExample(numberToAdd: Int, distances: scala.collection.mutable.WrappedArray[Double],
-                              neighbors: scala.collection.mutable.WrappedArray[DenseVector]) ={
-
-      val counts = distances.map(x=>(((x + 0.5)/ distances.sum) * numberToAdd).toInt).reverse
-      val originalExample = neighbors.head.toArray
-      val reverseNeighbors = neighbors.tail.reverse.map(x=>x.toArray)
-
-      // FIXME - only samples upto the required count
-
-
-
-      def addOffset(x: Array[Double], distanceLine: Array[Double], offset: Double): Array[Double] = {
-        Array[Array[Double]](x, distanceLine).transpose.map(x=>x(0) + x(1)*offset)
-      }
-
-      def getNeighborSamples(index: Int)= {
-        val distanceLine: Array[Double] = Array[Array[Double]](originalExample, reverseNeighbors(index)).transpose.map(x=>x(1)-x(0))
-        (0 until counts(index)).map(x=>addOffset(originalExample, distanceLine, x/counts(index).toDouble))
-      }
-
-
-      val x: Seq[IndexedSeq[Array[Double]]] = reverseNeighbors.indices.map(x=>getNeighborSamples(x))
-      x.reduce(_ union _).toArray
-    }
-
-
     val distances = neighbors.withColumn("distances", calculateDistances(neighbors("neighborFeatures")))
     distances.show
 
@@ -139,37 +147,49 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     val localDistanceWeights = stdWeights.withColumn("localDistanceWeights", calculateLocalDistanceWeights(stdWeights("distances")))
     localDistanceWeights.show
 
+    val calculateSamplesToAdd = udf((std: Double, distances: scala.collection.mutable.WrappedArray[Double]) => {
+      //distances.indices.map(x=>(std * distances(x) * samplesToAdd))
+      (std * minClassCount.toDouble).toInt
+    })
+
     val samplesToAddDF = localDistanceWeights.withColumn("samplesToAdd", calculateSamplesToAdd(localDistanceWeights("stdWeights"), localDistanceWeights("localDistanceWeights")))
     samplesToAddDF.show
-    import org.apache.spark.sql.functions._
-    import org.apache.spark.sql.SparkSession
-    import org.apache.spark.sql.expressions.Window
-    import org.apache.spark.sql.functions._
-    val calcSamplesToAdd = samplesToAddDF.select("samplesToAdd").collect.map(x=>x(0).toString.toDouble).sum
+    println("samples to add: " + samplesToAdd)
+
+
+    // val calcSamplesToAdd = samplesToAddDF.select("samplesToAdd").collect.map(x=>x(0).toString.toDouble).sum
 
     val sortDF = samplesToAddDF.sort(col("samplesToAdd").desc)
     sortDF.show
-    println(calcSamplesToAdd)
+    // println(calcSamplesToAdd)
 
-    val partitionWindow = Window.partitionBy($"label").orderBy($"samplesToAdd".desc)
+    //val partitionWindow = Window.partitionBy($"label").orderBy($"samplesToAdd".desc)
+
+
+    val partitionWindow = Window.partitionBy($"label").orderBy($"samplesToAdd".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     val sumTest = sum($"samplesToAdd").over(partitionWindow)
     val runningTotals = samplesToAddDF.select($"*", sumTest as "running_total")
 
-    val filteredTotals = runningTotals.filter(runningTotals("running_total") < samplesToAdd)
+    val w = Window.partitionBy($"label")
+      .orderBy($"samplesToAdd")
+      .rowsBetween(Window.unboundedPreceding, Window.currentRow)
 
-    //val addedSamples: Array[Row] = filteredTotals.withColumn("added", sampleExistingExample(filteredTotals("samplesToAdd"), filteredTotals("distances"), filteredTotals("neighborFeatures"))).select("added").collect
+    /*val filteredTotals2 = sortDF.withColumn("label", sum($"samplesToAdd").over(w))
+      .withColumn("val2_sum", sum($"samplesToAdd").over(w))
+    filteredTotals2.show*/
+
+    runningTotals.show(100)
+    println(runningTotals.count)
+   val filteredTotals = runningTotals.filter(runningTotals("running_total") <= samplesToAdd) // FIXME - use take if less then amount
+    println("samples to add: " + samplesToAdd)
+    println("~~~~~" + filteredTotals.count)
+
+    // val addedSamples: Array[Row] = filteredTotals.withColumn("added", sampleExistingExample(filteredTotals("samplesToAdd"), filteredTotals("distances"), filteredTotals("neighborFeatures"))).select("added").collect
     val addedSamples: Array[Array[Array[Double]]] = filteredTotals.collect.map(x=>sampleExistingExample(x(8).asInstanceOf[Int], x(4).asInstanceOf[mutable.WrappedArray[Double]], x(3).asInstanceOf[mutable.WrappedArray[DenseVector]]))
-    val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(0.toLong, minClassLabel.toInt, x.asInstanceOf[DenseVector]))
+    println("addedSamples: " + addedSamples.length)
+    val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(0.toLong, minClassLabel.toInt, x))
 
     println(collectedSamples.length)
-    /*println(collectedSamples(0).length)
-    for(x<-collectedSamples(0)) {
-      print(x + " ")
-    }
-    println("")
-    println(collectedSamples(1).length)
-    println(collectedSamples(2).length)
-*/
 
     val foo: Array[(Long, Int, DenseVector)] = collectedSamples.map(x=>x.toSeq).map(x=>(x.head.toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector]))
     val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
