@@ -8,7 +8,7 @@ import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.expressions.UserDefinedFunction
-import org.apache.spark.sql.functions.{desc, udf}
+import org.apache.spark.sql.functions.{col, desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
@@ -53,13 +53,12 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     type MajorityPoint = (Long, Int, Array[Double])
 
     def getMovedNeighbors(j: Int): (Boolean, (Long, Int, Array[Double])) ={
-      println("^^^ " + distances(j) + " " + ri)
+      // println("^^^ " + distances(j) + " " + ri)
       if(distances(j) <= ri) {
-        // println("@@", distances(j), ri)
         val d = pointDistance(features.toArray, majorityNeighbors(j))
-        // FIXME - check line 19 in algorithm for tj usage
+        // FIXME - check line 19 in algorithm for tj usage (ask about this)
         val scale =  (ri - d) / d
-        val offset: Array[Double] = Array(features.toArray, majorityNeighbors(j)).transpose.map(x=>x(0) - x(1)).map(x=>x * scale)
+        val offset: Array[Double] = Array(features.toArray, majorityNeighbors(j)).transpose.map(x=>x(1) - x(0)).map(x=>x * scale)
         val updatedPosition = Array(offset, majorityNeighbors(j)).transpose.map(x=>x(0)+x(1))
         (true, (majorityIndicies(j), majorityLabels(j), updatedPosition))
       } else {
@@ -67,27 +66,12 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       }
     }
 
-    println("~~~ indicies: " + majorityNeighbors.indices.length)
+    // println("~~~ indicies: " + majorityNeighbors.indices.length)
     val movedMajoirtyNeigbors = majorityNeighbors.indices.map(j=>getMovedNeighbors(j)).filter(x=>x._1).map(x=>x._2)
-    //println(movedMajoirtyNeigbors.length)
-    //println(movedMajoirtyNeigbors(0))
-    //val combinedMajoritNeighbors = movedMajoirtyNeigbors.reduce(_ union _)
-
-    //val xxx = combinedMajoritNeighbors.filter(x=>x._1)
-    //print(xxx.length)
-    //for(x<-xxx) {
-    // println(x)
-    // }
-
-    //print("***** " + combinedMajoritNeighbors.length)
-
-    //combinedMajoritNeighbors
-
-
     movedMajoirtyNeigbors
   })
 
-  val moveMajorityPoints: UserDefinedFunction = udf((features: DenseVector, neighborIndices: mutable.WrappedArray[Long],
+  /*val moveMajorityPoints: UserDefinedFunction = udf((features: DenseVector, neighborIndices: mutable.WrappedArray[Long],
                                                      neighborLabels: mutable.WrappedArray[Int], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
     val majorityIndicies: Array[Long] = neighborIndices.toArray
     val majorityLabels: Array[Int] = neighborLabels.toArray
@@ -127,97 +111,70 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     combinedMajoritNeighbors
     // return cleaning radius and moved majority points
 
-  })
+  })*/
 
-  val stuff: UserDefinedFunction = udf((features: DenseVector, distanceArray: mutable.WrappedArray[Double]) => {
-    // val majorityIndicies: Array[Long] = neighborIndices.toArray
-    // val majorityLabels: Array[Int] = neighborLabels.toArray
-    // val majorityNeighbors: Array[Array[Double]] = neighborFeatures.toArray.map(x=>x.toArray)
+  def NoP(distances: Array[Double], radius: Double): Int = {
+    def isWithinRadius(d: Double): Int ={
+      if (d <= radius) {
+        1
+      } else {
+        0
+      }
+    }
 
-    // val neighborDistances: Array[Double] = distanceArray.toArray
+    distances.map(x=>isWithinRadius(x)).sum + 1
+  }
+
+  def nearestNoWithinR(distances: Array[Double], r: Double): Double ={
+
+    def setWithinValue(d: Double, r: Double): Double ={
+      if(d < r) {
+        // println("123456") // FIXME - check this is max value could happen (added fix)
+        Double.MaxValue
+      } else {
+        d
+      }
+    }
+    distances.map(x=>setWithinValue(x, r)).min
+  }
+
+  val stuff: UserDefinedFunction = udf((distanceArray: mutable.WrappedArray[Double]) => {
+
     val distances = distanceArray.toArray
-
     var energyBudget = 0.64
     var ri = 0.0
     var deltaR = energyBudget
-
-
-    def nearestNoWithinR(distances: Array[Double], r: Double): Double ={
-
-      def setWithinValue(d: Double, r: Double): Double ={
-        if(d < r) {
-          Double.MaxValue
-        } else {
-          d
-        }
-      }
-      distances.map(x=>setWithinValue(x, r)).min
-    }
-    def NoP(distances: Array[Double], radius: Double): Int = {
-      def isWithinRadius(d: Double): Int ={
-        if (d <= radius) {
-          1
-        } else {
-          0
-        }
-      }
-
-      distances.map(x=>isWithinRadius(x)).sum + 1
-    }
 
     // generate cleaning radius
     while(energyBudget > 0.0) {
       val NoPValue = NoP(distances, ri)
       deltaR = energyBudget / NoPValue.toDouble
       if(NoP(distances, ri + deltaR) > NoPValue) {
-        deltaR = nearestNoWithinR(distances, ri)
+        // deltaR = nearestNoWithinR(distances, ri)
+        deltaR = distances.filter(x=>x>ri).min
       }
-      ri = ri + deltaR
-      energyBudget = energyBudget - deltaR * NoPValue
+      if(deltaR == Double.MaxValue) {
+        energyBudget = 0.0
+      } else {
+        ri = ri + deltaR
+        energyBudget = energyBudget - deltaR * NoPValue
+      }
     }
-    Math.pow(ri, -1)
-
-    // val updatedMajorityRows = Array[Row]()
-    /*
-    
-        def getMovedNeighbors(j: Int): Array[Row] ={
-          // println("^^^ " + distances(j) + " " + ri)
-          if(distances(j) <= ri) {
-            // println("@@", distances(j), ri)
-            val d = pointDistance(features.toArray, majorityNeighbors(j))
-            // FIXME - check line 19 in algorithm for tj usage
-            val scale =  (ri - d) / d
-            val offset: Array[Double] = Array(features.toArray, majorityNeighbors(j)).transpose.map(x=>x(0) - x(1)).map(x=>x * scale)
-            val updatedPosition = Array(offset, majorityNeighbors(j)).transpose.map(x=>x(0)+x(1))
-    
-            Array[Row](Row((majorityIndicies(j), majorityLabels(j), updatedPosition)))
-          } else {
-            Array[Row]()
-          }
-        }
-    
-        println("~~~ indicies: " + majorityNeighbors.indices.length)
-        val movedMajoirtyNeigbors = majorityNeighbors.indices.map(j=>getMovedNeighbors(j))
-        val combinedMajoritNeighbors: Array[Row] = movedMajoirtyNeigbors.reduce(_ union _)
-        print(combinedMajoritNeighbors(0))
-        print("***** " + combinedMajoritNeighbors.length)
-    
-    
-        // return cleaning radius and moved majority points
-      */
+    // Math.pow(ri, -1)
+    ri
   })
 
 
   def extractMovedPoints(index: Array[Long], label: Array[Int], feature: Array[Array[Double]]): Array[Row] ={
-    val X = index.indices.map(x=>Row(index(x), label(x), feature(x))).toArray
-    X
+    index.indices.map(x=>Row(index(x), label(x), feature(x))).toArray
   }
 
   def createSyntheicPoints(row: Row): Array[Row] ={
+    println(row.toString())
     val label = row(0).toString
     val features = row(1).asInstanceOf[DenseVector].toArray
     val r = row(2).toString.toDouble
-    val examplesToAdd = Math.floor(row(3).toString.toDouble + 0.5).toInt
+    val examplesToAdd = Math.ceil(row(3).toString.toDouble).toInt // FIXME - check this
 
     val random = scala.util.Random
     // (0 until examplesToAdd).map(_=>Row(0L, label, for(f <- features) yield Vectors.dense(f * (random.nextDouble() * 2.0 - 1) * r))).toArray
@@ -276,7 +233,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     test.printSchema()
 
     // FIXME - use full DF
-    val test2 = test.take(10)
+    val test2 = test.collect()// test.take(10)
 
     val foo = test2.map(x=>x.toSeq).map(x=>(x.head.toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector],
       x(3).asInstanceOf[mutable.WrappedArray[Double]], x(4).asInstanceOf[mutable.WrappedArray[Long]],
@@ -296,23 +253,40 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     testDF.printSchema()
 
 
-    val result = testDF.withColumn("ri", stuff($"features", $"distances"))
+    val result = testDF.withColumn("ri", stuff($"distances"))
     result.show
-    val inverseRiSum = result.select("ri").rdd.map(x=>x(0).toString.toDouble).reduce(_ + _)
+
+    val invertRi: UserDefinedFunction = udf((ri: Double) => {
+      Math.pow(ri, -1)
+    })
+
+    val inverseRi = result.withColumn("riInverted", invertRi($"ri"))
+    val inverseRiSum = inverseRi.select("riInverted").rdd.map(x=>x(0).toString.toDouble).reduce(_ + _)
     println("inverse sum " + inverseRiSum)
 
+    //val resultWithSampleCount = inverseRi.withColumn("gi", ($"riInverted"/ inverseRiSum) * samplesToAdd).sort(col("gi").desc)
+    //resultWithSampleCount.show
 
-    val resultWithSampleCount = result.withColumn("gi", ($"ri"/ inverseRiSum) * samplesToAdd)
+    val resultWithSampleCount = inverseRi.withColumn("gi", $"riInverted"/ inverseRiSum)//.sort(col("gi").desc)
     resultWithSampleCount.show
 
-    val createdPoints: Array[Array[Row]] = resultWithSampleCount.drop("index", "distances", "majorityIndex",
-      "majorityLabel", "majorityFeatures").collect().map(x=>createSyntheicPoints(x))
-    println("***")
-    for(x<-createdPoints) {
-      println(x.length)
-    }
+    val giSum = resultWithSampleCount.select("gi").rdd.map(x=>x(0).toString.toDouble).reduce(_ + _)
+    println(giSum)
 
-    val unionedPoints = createdPoints.reduce(_ union _)
+    val resulsWithSamplesToAdd = resultWithSampleCount.withColumn("samplesToAdd", ($"gi"/ giSum) * samplesToAdd).sort(col("samplesToAdd").desc)
+    resulsWithSamplesToAdd.show
+
+    // FIXME - should the sampling rate be proportional of gi?
+
+    val createdPoints: Array[Array[Row]] = resulsWithSamplesToAdd.drop("index", "distances", "majorityIndex",
+      "majorityLabel", "majorityFeatures", "riInverted", "gi").collect().map(x=>createSyntheicPoints(x))
+    println("***")
+    /*for(x<-createdPoints) {
+      println(x.length)
+    }*/
+    println("created points length: " + createdPoints.length)
+
+    val unionedPoints = createdPoints.reduce(_ union _).take(samplesToAdd)
     println("~~~~~~ oversampled points: " + unionedPoints.length)
 
     val movedPoints = resultWithSampleCount.withColumn("movedMajorityPoints",
@@ -331,43 +305,26 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     val movedPointsCollected = movedPointsSelected.collect()
 
-    val fooX = movedPointsCollected.map(x=>(x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray,
+    val fooX: Array[(Array[Long], Array[Int], Array[Array[Double]])] = movedPointsCollected.map(x=>(x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray,
       x(1).asInstanceOf[mutable.WrappedArray[Int]].toArray,
       x(2).asInstanceOf[mutable.WrappedArray[mutable.WrappedArray[Double]]].toArray.map(y=>y.toArray)))
 
     val results = fooX.map(x=>extractMovedPoints(x._1, x._2, x._3))
 
-    val total = results.reduce(_ union _)
+    val total: Array[Row] = results.reduce(_ union _)
     println(total.length)
-    /*for(x <- total.indices) {
-      println(total(x)(0))
-    }*/
-
-    // val totalIndicies = total.map(x=>x(0))
 
     val grouped: Map[Long, Array[Row]] = total groupBy (s => s(0).toString.toLong)
 
 
     def getAveragedRow(rows: Array[Row]): Row ={
-      val data: Array[Double] = rows.map(x=>x(2).asInstanceOf[Array[Double]]).transpose.map(x=>x.sum)
+      val data: Array[Double] = rows.map(x=>x(2).asInstanceOf[Array[Double]]).transpose.map(x=>x.sum).map(x=>x/rows.length.toDouble)
       Row(rows(0)(0).toString.toLong, rows(0)(1).toString.toInt, Vectors.dense(data))
-
-
     }
 
     val averaged: Array[Row] = grouped.map(x=>getAveragedRow(x._2)).toArray
 
     val movedMajorityIndicies = averaged.map(x=>x(0).toString.toLong).toList
-    /*for(x<-movedMajorityIndicies) {
-      println(x)
-    }
-
-    println("~~~~~")
-    println(df.count)
-
-
-    df.printSchema()*/
-
 
 
     println("############")
@@ -407,58 +364,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     finalDF.show()
     println(finalDF.count())
-
-
-    /*// val df = dfIn.filter((dfIn("label") === 1) || (dfIn("label") === 5)) // FIXME
-    val values = Array(2708, 2794)
-    val xxx: Array[Row] = averaged.filter(x=>values.contains(x(0)))
-
-
-
-
-    for(x<-averaged) {
-      println(x)
-    }
-    println("***************")
-    for(x<-xxx) {
-      println(x)
-    }*/
-
-    /*val averagedPoints = for((key, value) <- grouped) {
-
-    }*/
-
-    /*for((key,language) <- grouped){
-  println(count + " -> " + language)
-
-}
-
-val taken = grouped.keys.foreach( (s) =>
-  println( "x" + s)
-
-)*/
-
-
-
-    //  def extractMovedPoints(indices: Array[Long], labels: Array[Int], features: Array[Array[Double]]): Int ={
-
-    /*val fooX = movedPointsCollected.map(x=>x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray)
-    println(fooX(0).toVector)
-
-    val fooXX = movedPointsCollected.map(x=>x(1).asInstanceOf[mutable.WrappedArray[Int]].toArray)
-    println(fooXX(0).toVector)
-
-    val fooXXX = movedPointsCollected.map(x=>x(2).asInstanceOf[mutable.WrappedArray[mutable.WrappedArray[Double]]].toArray.map(y=>y.toArray.toVector))
-    println(fooXXX(0)(0))*/
-
-    //val barX = fooX(0).asInstanceOf[mutable.WrappedArray[mutable.WrappedArray[Double]]].toArray
-    //val barY = barX.map(x=>x.toArray.toVector)
-    //println(barY(0))
-
-
-    //val xx = movedPoints.select("movedMajorityPoints").collect()
-    //val foo2 = xx.map(x=>x(0))
-    //println(foo2(0).asInstanceOf[mutable.WrappedArray[(Long, Int, mutable.WrappedArray[Double])]])
 
     finalDF
   }
