@@ -170,7 +170,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
   }
 
   def createSyntheicPoints(row: Row): Array[Row] ={
-    println(row.toString())
+    //println(row.toString())
     val label = row(0).toString
     val features = row(1).asInstanceOf[DenseVector].toArray
     val r = row(2).toString.toDouble
@@ -182,27 +182,26 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
   }
 
 
-  override def transform(dataset: Dataset[_]): DataFrame = {
-    
-
+  //def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame ={
+  def oversampleClass(df: DataFrame, minorityClassLabel: String, samplesToAdd: Int): DataFrame ={
     // parameters
     // proportion = 1.0, energy = 1.0, scaling = 0.0
-
-    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+    // val df = dataset.toDF
+    //val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
     val spark = df.sparkSession
     import spark.implicits._
-    
-    val counts = getCountsByClass(spark, "label", df).sort("_2")
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val samplesToAdd = maxClassCount - minClassCount
+    //val counts = getCountsByClass(spark, "label", df).sort("_2")
+    //val minClassLabel = counts.take(1)(0)(0).toString
+    //val minClassCount = counts.take(1)(0)(1).toString.toInt
+    //val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    //val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    //val samplesToAdd = maxClassCount - minClassCount
     println("Samples to add: " + samplesToAdd)
 
-    val minorityDF = df.filter(df("label") === minClassLabel)
-    val majorityDF = df.filter(df("label") === maxClassLabel)
+    val minorityDF = df.filter(df("label") === minorityClassLabel)
+    val majorityDF = df.filter(df("label") =!= minorityClassLabel)
 
     val leafSize = 100
     val kValue = 10 /// FIXME - switch to distance?
@@ -366,6 +365,37 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     println(finalDF.count())
 
     finalDF
+  }
+
+
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+
+    var df = dataset.toDF()
+
+    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    //val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+   //  val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+
+    // val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+
+    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)//.sortBy(_._2)//.reverse
+    for(x<-minorityClasses) {
+      println(x._1, x._2)
+    }
+
+    // FIXME - does the order matter?
+    for(minorityClass<-minorityClasses) {
+      df = oversampleClass(df, minorityClass._1, majorityClassCount - minorityClass._2)
+    }
+
+    println("dataset: " + dataset.count)
+    println("added: " + df.count)
+
+    df
   }
 
   override def transformSchema(schema: StructType): StructType = {
