@@ -46,13 +46,15 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     val index = row(0).toString.toLong
     val label = row(1).toString.toInt
     val features = row(2).asInstanceOf[DenseVector].toArray
-    val neighbors = row(3).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail
+    val neighbors = row(3).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail // skip the self neighbor
     val randomNeighbor = neighbors(Random.nextInt(neighbors.length)).toArray
 
     val randmPoint = Random.nextDouble()
     val gap = features.indices.map(x => (randomNeighbor(x) - features(x)) * randmPoint).toArray
 
-    val ranges = features.indices.map(x => getGaussian(features(x), 0.5)).toArray
+    val sigma = 0.5 // FIXME - make it a parameter
+    // FIXME - ask if this should be multi-dimensional?
+    val ranges = features.indices.map(x => getGaussian(gap(x), sigma)).toArray
     val syntheticExample = Vectors.dense(Array(features, randomNeighbor, ranges).transpose.map(x => x(0) + (x(1) - x(0) * x(2)))).toDense
 
     Row(index, label, syntheticExample)
@@ -95,14 +97,11 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
         s0 = self.sample_between_points(X_min[idx], X_min[random_neighbor])
         samples.append(self.random_state.normal(s0, self.sigma))*/
 
-    val gauss = Gaussian(0.0, 0.5)
-    println(gauss.draw())
-    println(gauss.draw())
-    println(gauss.draw())
-    println(gauss.draw())
-    println(gauss.draw())
+    val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(minorityDF.count.toInt))
+    val collected = t.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
+    val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), df.schema).sort("index")
 
-    df // FIXME
+    df.union(createdSamples)
   }
 
   override def transformSchema(schema: StructType): StructType = {
