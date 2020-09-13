@@ -49,19 +49,17 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
   }
 
 
-  override def transform(dataset: Dataset[_]): DataFrame = {
+  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame = {
+
     val df = dataset.toDF
+    import df.sparkSession.implicits._
     val spark = df.sparkSession
-    import spark.implicits._
 
-    val counts = getCountsByClass(spark, "label", df).sort("_2")
-    counts.show()
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+    val Smin = df.filter(df("label") === minorityClassLabel)
+    val Smaj = df.filter(df("label") =!= minorityClassLabel)
 
-    val samplesToAdd = maxClassCount - minClassCount
+    //val minorityClassCount = Smin.count
+    //val majorityClassCount = Smaj.count
 
     /*1) find k1 NNs of minority examples
       2) from minority examples, remove examples with no minority example neighbors
@@ -82,11 +80,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     */
 
 
-    println(minClassLabel, minClassCount)
-    println(maxClassLabel, maxClassCount)
-
-    val Smaj = df.filter(df("label") =!= minClassLabel)
-    val Smin = df.filter(df("label") === minClassLabel)
 
     val leafSize = 100
     /** 1 **/
@@ -311,51 +304,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     println("Running totals: ")
     runningTotals.show()
 
-    // For all examples to generate:
-/*
-    // a
-    // Select a sample x from Simin according to probability distribution fS p ðx i Þg. Let, x is a member of the cluster Lk, 1 <= k <= M.
-    // ** take example from Simin based on probability density
-    // ** transform example, find cluster number
-
-    def generateExample(): (Long, Int, DenseVector) = {
-      // FIXME - need to redo collection/indexing of Simin
-
-      // FIXME - change how this works with collected values
-      val randomSamplesX = SiminKMeansClusters.filter(SiminKMeansClusters("prediction") === Random.nextInt(clusterKValue))
-      println("count: " + randomSamplesX.count())
-
-      val randomSamples = if(randomSamplesX.count() > 50) {
-        randomSamplesX.sample(withReplacement = false, 0.1).take(2) // FIXME
-      } else {
-        randomSamplesX.sample(withReplacement = false, 1.0).take(2)
-      }
-
-      //println("take: " + randomSamples.length)
-      val xSample = randomSamples(0)(1).asInstanceOf[DenseVector]
-      //println(xSample)
-
-      // b
-      // Select another sample y, at random, from the members of the cluster Lk
-      // ** pick random from cluster with previous cluster nunber
-      val ySample = randomSamples(1)(1).asInstanceOf[DenseVector]
-      // println(ySample)
-      // c
-      // Generate one synthetic data, s, according to s = x + a * (y - x), where a is a random number in range[0,1]
-      // ** simple
-
-      val alpha = Random.nextDouble()
-      val synthetic = Array(xSample.toArray, ySample.toArray).transpose.map(x=> x(0) + alpha * (x(1) - x(0)))
-      //println(synthetic)
-
-      (0L, randomSamples(0)(0).toString.toInt, Vectors.dense(synthetic).toDense)
-
-      // d
-      // Add s to Somin : Somin = Somin U {s}
-      // ** simple
-    }*/
-
-
     val runningTotalsCollected = runningTotals.collect()
 
     val groupedClusters = (0 until clusterKValue).map(x=>runningTotalsCollected.filter(_(3)==x))
@@ -397,7 +345,29 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     df.printSchema()
     syntheticDF.printSchema()
 
-    df.union(syntheticDF)
+    syntheticDF
+  }
+
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+
+    val df = dataset.toDF()
+    // import df.sparkSession.implicits._
+
+    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
+    // val minClassLabel = counts.take(1)(0)(0).toString
+    // val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+
+    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+
+    println("dataset: " + dataset.count)
+    println("added: " + results.count)
+
+    results
   }
 
   override def transformSchema(schema: StructType): StructType = {
