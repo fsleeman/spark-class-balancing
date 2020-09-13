@@ -19,6 +19,7 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.ml.sampling.utils.pointDifference
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.types.StructType
 
 
@@ -84,14 +85,15 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     println(minClassLabel, minClassCount)
     println(maxClassLabel, maxClassCount)
 
-    val minorityDF = df.filter(df("label") === minClassLabel)
-    val majorityDF = df.filter(df("label") =!= minClassLabel)
+    val Smaj = df.filter(df("label") =!= minClassLabel)
+    val Smin = df.filter(df("label") === minClassLabel)
 
     val leafSize = 100
     /** 1 **/
     val k1 = 5
     val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+      //.setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+      .setTopTreeSize(10)   /// FIXME - check?
       .setTopTreeLeafSize(leafSize)
       .setSubTreeLeafSize(leafSize)
       .setK(k1 + 1) // include self example
@@ -99,24 +101,25 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
 
     val f1: KNNModel = model.fit(df)
 
-    val Smin = f1.transform(minorityDF).sort("index")
+    val SminNN = f1.transform(Smin).sort("index")
     println("*** first knn ****")
-    Smin.show
+    SminNN.show
 
     /** 2 **/
-    val Sminf = Smin.withColumn("nnMinorityCount", getMatchingClassCount($"neighbors.label", $"label")).sort("index").filter("nnMinorityCount > 0")
+    val Sminf = SminNN.withColumn("nnMinorityCount", getMatchingClassCount($"neighbors.label", $"label")).sort("index").filter("nnMinorityCount > 0")
     Sminf.show
 
     /** 3 **/
     val k2 = 5
     val model2 = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+      //.setTopTreeSize(df.count().toInt / 1)   /// FIXME - check?
+      .setTopTreeSize(10)   /// FIXME - check?
       .setTopTreeLeafSize(leafSize)
       .setSubTreeLeafSize(leafSize)
-      .setK(k2 + 1) // include self example
+      .setK(k2) // Don't include self example
       .setAuxCols(Array("label", "features"))
 
-    val f2: KNNModel = model2.fit(majorityDF)
+    val f2: KNNModel = model2.fit(Smaj)
 
     val Nmaj = f2.transform(Sminf.drop("neighbors", "nnMinorityCount")).sort("index")
     println("*** NMaj ****")
@@ -128,22 +131,25 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       .withColumn("features", $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Int]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     val Sbmaj = spark.sparkContext.parallelize(explodedNeighbors).toDF("label", "features").distinct()
+    println("~~ Sbmaj")
+    Sbmaj.show
     println(Sbmaj.count())
 
     /** 5 **/
     val k3 = 5
     val model3 = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(minorityDF.count().toInt / 8)   /// FIXME - check?
+      //.setTopTreeSize(Smin.count().toInt / 8)   /// FIXME - check?
+      .setTopTreeSize(10)   /// FIXME - check?
       .setTopTreeLeafSize(leafSize)
       .setSubTreeLeafSize(leafSize)
-      .setK(k3 + 1) // include self example
+      .setK(k3) // Don't include self example
       .setAuxCols(Array("label", "features"))
 
     /*val f3: KNNModel = model.fit(majorityDF)
 
     val Nmin = f3.transform(Sminf.drop("neighbors", "nnMinorityCount")).sort("index")*/
-    println("minorityDF: " + minorityDF.count)
-    val f3: KNNModel = model3.fit(minorityDF)
+    println("minorityDF: " + Smin.count)
+    val f3: KNNModel = model3.fit(Smin)
     val Nmin = f3.transform(Sbmaj.drop("neighbors", "nnMinorityCount"))//.sort("index")
 
     Nmin.show
@@ -157,6 +163,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     }*/
     // FIXME - correct Simin creation
     val Simin = spark.sparkContext.parallelize(explodedNeighbors2).toDF("label", "features").distinct()
+    println("~~ foo: ")
     Simin.show
     //println(Sbmaj.count())
 
@@ -167,6 +174,20 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     println(Sbmaj.count)
 
 
+    /*
+      1) yi for each Sbmaj
+      2) xi for each Simin
+      3) Calculate Iw(yi, xi)
+       a) Iw(yi, xi) = Cf(yi, xi) * Df(yi, xi)
+       b) dn(yi, xi) = dist(yi, xi)/ l, l = number of dimensions
+       c) Cf(yi, xi_) = Formula 6
+       d) Df(yi, xi) = Formula 8
+
+     */
+
+
+    /*
+    // ~~~~~~  By majority class
     val SiminCollected: Array[DenseVector] = Simin.select("features").collect().map(x=>x(0).asInstanceOf[DenseVector])
 
     val getClosenessFactors = udf((majorityExample: DenseVector) => {
@@ -174,7 +195,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       def calculateClosenessFactor(y: DenseVector, x: DenseVector, l: Int): Double ={
         val distance = pointDifference(y.toArray, x.toArray) / l.toDouble
         val CMAX: Double = 3.0
-        val Cf_th: Double = 5.0
+        val Cf_th: Double = 50.0 // FIXME- should this be on the order of the number of features?
 
         val numerator = if(1/distance <= Cf_th) {
           1/distance
@@ -184,14 +205,42 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
         (numerator / Cf_th) * CMAX
       }
 
-      SiminCollected.map(x=>calculateClosenessFactor(majorityExample, x, majorityExample.size)).sorted
+      SiminCollected.map(SiminValue=>calculateClosenessFactor(majorityExample, SiminValue, majorityExample.size)).sorted
     })
 
 
     Sbmaj.show()
-    val closenessFactors = Sbmaj.withColumn("closeness", getClosenessFactors(Sbmaj("features")))
+    val closenessFactors = Sbmaj.withColumn("closeness", getClosenessFactors(Sbmaj("features"))) // result is majority data with minority closeness values
+    closenessFactors.show()
+    closenessFactors.printSchema()*/
+
+    // ~~~~ by minority class
+    val SbmajCollected: Array[DenseVector] = Sbmaj.select("features").collect().map(x=>x(0).asInstanceOf[DenseVector])
+
+    val getClosenessFactors = udf((minorityExample: DenseVector) => {
+      // FIXME - these values are always set to CMAX, wrong values for CMAX and Cf_th?
+      def calculateClosenessFactor(x: DenseVector, y: DenseVector, l: Int): Double ={
+        val distance = pointDifference(y.toArray, x.toArray) / l.toDouble
+        val CMAX: Double = 3.0
+        val Cf_th: Double = 50.0 // FIXME- should this be on the order of the number of features?
+
+        val numerator = if(1/distance <= Cf_th) {
+          1/distance
+        } else {
+          Cf_th
+        }
+        (numerator / Cf_th) * CMAX
+      }
+
+      SbmajCollected.map(SbmajValue=>calculateClosenessFactor(minorityExample, SbmajValue, 54)).sorted // FIXME - set feature length a member variable
+    })
+
+
+    // Sbmaj.show()
+    val closenessFactors = Simin.withColumn("closeness", getClosenessFactors(Simin("features"))) // result is majority data with minority closeness values
     closenessFactors.show()
     closenessFactors.printSchema()
+
 
     val calculateInformationWeights = udf((closenessFactors: mutable.WrappedArray[Double]) => { // , closenessFactors: Array[Double]
       closenessFactors.toArray.map(x=>x*x/closenessFactors.toArray.sum)
@@ -200,8 +249,11 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val informationWeights = closenessFactors.withColumn("informationWeights", calculateInformationWeights(closenessFactors("closeness")))
     informationWeights.show
 
-    informationWeights.select("informationWeights")
-    /* 8 */ // FIXME - check this
+    // informationWeights.select("informationWeights") // this should be the information weights for each maj example, then for each minority examples
+
+
+
+    /* 8 */ // FIXME - wrong
 
     val calculateSelectionWeights = udf((informationWeights: mutable.WrappedArray[Double]) => { // , closenessFactors: Array[Double]
       informationWeights.toArray.sum
@@ -209,13 +261,15 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val selectionWeights = informationWeights.withColumn("selectionWeights", calculateSelectionWeights(informationWeights("informationWeights")))
     selectionWeights.show
 
+    println("selection weight count: " + selectionWeights.count() )
+
     /* 9 */
     val selectionWeightSum = selectionWeights.select("selectionWeights").collect().map(x=>x(0).asInstanceOf[Double]).sum
 
     val calculateSelectionProbabilities = udf((selectionWeight: Double) => { // , closenessFactors: Array[Double]
       selectionWeight / selectionWeightSum
     })
-    val selectionProbabilities = selectionWeights.withColumn("selectionProbabilities", calculateSelectionProbabilities(selectionWeights("selectionWeights")))
+    val selectionProbabilities = selectionWeights.withColumn("selectionProbabilities", calculateSelectionProbabilities(selectionWeights("selectionWeights")))//.sort(col("selectionProbabilities").desc)
     selectionProbabilities.show
 
     // selection weights
@@ -236,18 +290,30 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val clusterKValue = 10
     val kmeans = new KMeans().setK(clusterKValue).setSeed(1L)
     val kMeansModel = kmeans.fit(Smin)
-    val SiminKMeansClusters = kMeansModel.transform(Simin)
+    val SiminKMeansClusters = kMeansModel.transform(selectionProbabilities)
 
     SiminKMeansClusters.show
 
     /* 11 */
-    // Somin = Smin
+    // Somin = Smin -- don't do it here
+
 
     /* 12 */
 
-    // For all examples to generate:
+    val SiminClustersCollected = SiminKMeansClusters.select("label", "features", "selectionProbabilities", "prediction")
+    SiminClustersCollected.show
 
-    /* a */
+    val partitionWindow = Window.partitionBy($"label").orderBy($"selectionProbabilities".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    val sumTest = sum($"selectionProbabilities").over(partitionWindow)
+    //val runningTotals = samplesToAddDF.select($"*", sumTest as "running_total")
+    val runningTotals = SiminClustersCollected.select($"*", sumTest as "running_total")
+
+    println("Running totals: ")
+    runningTotals.show()
+
+    // For all examples to generate:
+/*
+    // a
     // Select a sample x from Simin according to probability distribution fS p ðx i Þg. Let, x is a member of the cluster Lk, 1 <= k <= M.
     // ** take example from Simin based on probability density
     // ** transform example, find cluster number
@@ -260,21 +326,21 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       println("count: " + randomSamplesX.count())
 
       val randomSamples = if(randomSamplesX.count() > 50) {
-        randomSamplesX.sample(false, 0.1).take(2) // FIXME
+        randomSamplesX.sample(withReplacement = false, 0.1).take(2) // FIXME
       } else {
-        randomSamplesX.sample(false, 1.0).take(2)
+        randomSamplesX.sample(withReplacement = false, 1.0).take(2)
       }
 
       //println("take: " + randomSamples.length)
       val xSample = randomSamples(0)(1).asInstanceOf[DenseVector]
       //println(xSample)
 
-      /* b */
+      // b
       // Select another sample y, at random, from the members of the cluster Lk
       // ** pick random from cluster with previous cluster nunber
       val ySample = randomSamples(1)(1).asInstanceOf[DenseVector]
       // println(ySample)
-      /* c */
+      // c
       // Generate one synthetic data, s, according to s = x + a * (y - x), where a is a random number in range[0,1]
       // ** simple
 
@@ -284,16 +350,42 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
 
       (0L, randomSamples(0)(0).toString.toInt, Vectors.dense(synthetic).toDense)
 
-      /* d */
+      // d
       // Add s to Somin : Somin = Somin U {s}
       // ** simple
+    }*/
+
+
+    val runningTotalsCollected = runningTotals.collect()
+
+    val groupedClusters = (0 until clusterKValue).map(x=>runningTotalsCollected.filter(_(3)==x))
+
+
+    val r = new scala.util.Random()
+
+    def generateExample(): (Long, Int, DenseVector) = {
+
+      val randomIndexPoint = r.nextDouble()
+      val selectedRow = runningTotalsCollected.filter(x=>x(4).asInstanceOf[Double]>=randomIndexPoint)(0)// runningTotals.filter(runningTotals("running_total") >= randomIndexPoint).take(1)(0)
+
+      val label = selectedRow(0).asInstanceOf[Int]
+      val features = selectedRow(1).asInstanceOf[DenseVector]
+      val cluster = selectedRow(3).asInstanceOf[Int]
+
+      val randomIndex = (groupedClusters(cluster).length * r.nextDouble()).toInt
+      val randomExample = groupedClusters(cluster)(randomIndex)(1).asInstanceOf[DenseVector]  // runningTotals.filter(runningTotals("prediction") === cluster).take(1)(0)(1).asInstanceOf[DenseVector]
+
+      val alpha = r.nextDouble()
+      val synthetic = Array(features.toArray, randomExample.toArray).transpose.map(x=> x(0) + alpha * (x(1) - x(0)))
+
+      (0L, label, Vectors.dense(synthetic).toDense)
     }
 
+
     // val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample()) // FIXME - super slow, change method
-    val syntheticExamples = (0 until 1).map(_=>generateExample())
+    val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample())
     println("example count " + syntheticExamples.length)
-    import spark.implicits._
-    import df.sparkSession.implicits._
+
     val syntheticDF = spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
       .withColumnRenamed("_1","index")
       .withColumnRenamed("_2","label")
