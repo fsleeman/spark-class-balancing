@@ -60,26 +60,21 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     Row(index, label, syntheticExample)
   }
 
-  override def transform(dataset: Dataset[_]): DataFrame = {
-    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame = {
+    val df = dataset.toDF
     val spark = df.sparkSession
     import spark.implicits._
+
+    val minorityDF = df.filter(df("label") === minorityClassLabel)
+    // val majorityDF = df.filter(df("label") =!= minorityClassLabel)
+
     val m = 5   // k-value
     val leafSize = 1000
 
-    val counts = getCountsByClass(spark, "label", df).sort("_2")
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
-
-    val samplesToAdd = maxClassCount - minClassCount
-    println("Samples to add: " + samplesToAdd)
-
     /*** For each minority example, calculate the m nn's in training set***/
-    val minorityDF = df.filter(df("label")===minClassLabel)
+    //val minorityDF = df.filter(df("label")===minClassLabel)
     val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
+      .setTopTreeSize(10)   /// FIXME - check?
       .setTopTreeLeafSize(leafSize)
       .setSubTreeLeafSize(leafSize)
       .setK(m + 1) // include self example
@@ -91,17 +86,31 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     t.show()
     t.printSchema()
 
-    /*while len(samples) < num_to_sample:
-        idx= self.random_state.randint(len(X_min))
-        random_neighbor= self.random_state.choice(ind[idx][1:])
-        s0 = self.sample_between_points(X_min[idx], X_min[random_neighbor])
-        samples.append(self.random_state.normal(s0, self.sigma))*/
-
     val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(minorityDF.count.toInt))
     val collected = t.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
     val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), df.schema).sort("index")
 
-    df.union(createdSamples)
+    createdSamples
+  }
+
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val df = dataset.toDF()
+    // import df.sparkSession.implicits._
+
+    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
+    // val minClassLabel = counts.take(1)(0)(0).toString
+    // val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+
+    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+
+    println("dataset: " + dataset.count)
+    println("added: " + results.count)
+
+    results
   }
 
   override def transformSchema(schema: StructType): StructType = {
