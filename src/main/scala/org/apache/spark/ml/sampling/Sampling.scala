@@ -9,6 +9,8 @@ import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.mllib.linalg.Vector
+import org.apache.spark.ml.linalg.SparseVector
 
 import scala.io.Source
 import scala.util.Random
@@ -248,18 +250,24 @@ object Sampling {
 
     val converted: DataFrame = convertFeaturesToVector(results)
 
+    val asDense = udf((v: SparseVector) => v.toDense)
+
     val scaledData: DataFrame = if(enableDataScaling) {
       val scaler = new MinMaxScaler()
         .setInputCol("features")
         .setOutputCol("scaledFeatures")
       val scalerModel = scaler.fit(converted)
       val scaledData: DataFrame = scalerModel.transform(converted)
-      scaledData.drop("features").withColumnRenamed("scaledFeatures", "features")
+      scaledData.drop("features").withColumn("features", asDense($"scaledFeatures")).drop("scaledFeatures")  //.withColumnRenamed("scaledFeatures", "features") ..
     } else { converted }.cache()
+
+
 
     val counts = scaledData.count()
     var splits = Array[Int]()
+    println("scaled data")
     scaledData.show()
+    scaledData.printSchema()
 
 
     splits :+= 0
@@ -322,7 +330,7 @@ object Sampling {
                val r = new SafeLevelSMOTE()
                val model = r.fit(trainData)
                model.transform(trainData)
-             } else if(samplingMethod == "SMOTE") {
+             } else if(samplingMethod == "smote") {
                val r = new SMOTE // multi-class done
                val model = r.fit(trainData)
                model.transform(trainData)

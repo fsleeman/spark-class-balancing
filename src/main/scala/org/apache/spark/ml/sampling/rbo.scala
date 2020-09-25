@@ -32,11 +32,13 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
   }
 
   def calculatePhi(x: Array[Double], K: Array[Array[Double]], k: Array[Array[Double]], gamma: Double): Double = {
-    val majorityValue = K.map(Ki=>Math.exp(-Math.pow(pointDifference(Ki, x)/gamma, 2)))
-    val minorityValue = k.map(ki=>Math.exp(-Math.pow(pointDifference(ki, x)/gamma, 2)))
+    val majorityValue = K.map(Ki=>Math.exp(-Math.pow(pointDifference(Ki, x)/gamma, 2))) /// FIXME - Super slow
+    val minorityValue = k.map(ki=>Math.exp(-Math.pow(pointDifference(ki, x)/gamma, 2))) /// FIXME - Super slow
 
     //println(majorityValue.sum, minorityValue.sum)
+
     majorityValue.sum - minorityValue.sum
+    0.0
   }
 
   def getRandomStopNumber(numInterations: Int, p: Double) : Int = {
@@ -53,22 +55,23 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
   }
 
   def createExample(majorityExamples: Array[Array[Double]], minorityExamples: Array[Array[Double]], gamma: Double, stepSize: Double, numInterations: Int, p: Double): DenseVector = {
-    println("****** at create Example *****")
-    println("numIterations: " + numInterations)
-    println("stopIndex: " + getRandomStopNumber(numInterations, p))
+    //println("****** at create Example *****")
+    //println("numIterations: " + numInterations)
+    //println("stopIndex: " + getRandomStopNumber(numInterations, p))
 
-    val featureLength = minorityExamples(0).size
-    println("feature length: " + featureLength)
-    var point = minorityExamples(Random.nextInt(minorityExamples.length))
+    val featureLength = minorityExamples(0).length
+    // println("feature length: " + featureLength)
+    val point = minorityExamples(Random.nextInt(minorityExamples.length))
 
-    for(_<-0 until getRandomStopNumber(numInterations, p)) {
+    for(x<-0 until getRandomStopNumber(numInterations, p)) {
+      println(x)
       val directions = Set(-1, 1)
       val d: Array[Double] = (0 until featureLength).map(x=>directions.toVector(Random.nextInt(directions.size)).toDouble).toArray
       val v: Array[Double] = (0 until featureLength).map(x=>Random.nextDouble()).toArray
 
       val translated: Array[Double] = Array(point, v, d).transpose.map(x=>x(0) + x(1) * x(2) * stepSize)
       if(calculatePhi(translated, majorityExamples, minorityExamples, gamma) < calculatePhi(point, majorityExamples, minorityExamples, gamma)) {
-        point = translated
+        //point = translated
       }
     }
     Vectors.dense(point).toDense
@@ -102,7 +105,7 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     val minorityExamples = minorityDF.collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
     val majorityExamples = majorityDF.collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
 
-    val addedPoints = (0 until 10).map(_=>createExample(majorityExamples, minorityExamples, gamma, stepSize, numInterations, p))
+    val addedPoints = (0 until maxClassCount-minClassCount).map(_=>createExample(majorityExamples, minorityExamples, gamma, stepSize, numInterations, p))
 
     val foo: Array[(Long, Int, DenseVector)] = addedPoints.map(x=>(0.toLong, minClassLabel.toInt, x)).toArray
     val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))

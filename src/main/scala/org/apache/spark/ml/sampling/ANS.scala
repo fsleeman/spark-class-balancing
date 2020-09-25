@@ -1,14 +1,17 @@
 package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.knn.KNN
+import org.apache.spark.ml.knn.{KNN, KNNModel}
+import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.sql.functions.desc
+import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
+
+import scala.collection.mutable
 
 
 /*
@@ -144,8 +147,8 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
 
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    
-    val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+
+    val df = dataset.filter((dataset("label") === 5) || (dataset("label") === 6)).toDF // FIXME
     val spark = df.sparkSession
     import spark.implicits._
     val counts = getCountsByClass(spark, "label", df).sort("_2")
@@ -158,41 +161,157 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
     println("Samples to add: " + samplesToAdd)
 
     val minorityDF = df.filter(df("label") === minClassLabel)
+    val majorityDF = df.filter(df("label") =!= minClassLabel)
 
-    val C_max= (0.25*df.count()).toInt
+    val C_max = Math.ceil(0.25 * df.count()).toInt
 
     val leafSize = 10 // FIXME
 
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(minorityDF.count().toInt / 8) /// FIXME - check?
+    val minorityKnnModel: KNN = new KNN().setFeaturesCol("features")
+      .setTopTreeSize(10) /// FIXME - check?
       .setTopTreeLeafSize(leafSize)
       .setSubTreeLeafSize(leafSize)
       .setK(1 + 1) // include self example
       .setAuxCols(Array("label", "features"))
 
-    val f = model.fit(minorityDF)
+    val getNearestNeighborDistance = udf((distances: mutable.WrappedArray[Double]) => {
+      distances(1)
+    })
 
-    val neighbors = f.transform(minorityDF).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
-    neighbors.show()
-    neighbors.printSchema()
+    val minorityKnnFit: KNNModel = minorityKnnModel.fit(minorityDF).setDistanceCol("distances")
+
+    val minorityNeighbors = minorityKnnFit.transform(minorityDF).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
+    minorityNeighbors.show()
+    minorityNeighbors.printSchema()
+
+    val minorityClosestDistance = minorityNeighbors.withColumn("closestDistance", getNearestNeighborDistance($"distances")).drop("distances", "neighborFeatures")
+    minorityClosestDistance.show
+
+
+    val majorityKnnModel: KNN = new KNN().setFeaturesCol("features")
+      .setTopTreeSize(10) /// FIXME - check?
+      .setTopTreeLeafSize(leafSize)
+      .setSubTreeLeafSize(leafSize)
+      //.setK(20) // include self example
+      .setAuxCols(Array("label", "features"))
+    //.setQueryByDistance(true)   // FIXME - move this
+
+    // println("@@ query mode: " + majorityKnnModel.getQueryMode)
+
+    val majorityKnnFit: KNNModel = majorityKnnModel.fit(majorityDF).setDistanceCol("distances").setMaxDistanceCol("closestDistance").setQueryByDistance(true)//.setK(20)
+
+    //val majorityNeighbors = majorityKnnFit.transform(minorityClosestDistance.filter(minorityClosestDistance("index")===9670)).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
+    val majorityNeighbors = majorityKnnFit.transform(minorityClosestDistance).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
+    majorityNeighbors.show()
+    majorityNeighbors.printSchema()
+
+    val getRadiusNeighbors = udf((distances: mutable.WrappedArray[Double]) => {
+      distances.length
+    })
+
+
+    val outBorder = majorityNeighbors.withColumn("radiusNeighbors", getRadiusNeighbors($"distances"))
+    outBorder.show
+
+    val outBorderArray = outBorder.select("radiusNeighbors").collect().map(x => x(0).asInstanceOf[Int])
+    println("outborder " + outBorderArray.length)
+    for(x<-outBorderArray) {
+      //println(" ---- " + x)
+    }
+    println("max:" + outBorderArray.max)
+
+    var previous_number_of_outcasts = -1
+    var C = 1
+    //var best_diff = Int.MaxValue
+
+    import scala.util.control._
+    val loop = new Breaks
+    loop.breakable {
+      for (c <- 1 until C_max) {
+
+        val number_of_outcasts = outBorderArray.filter(x => x >= c).sum
+        println("loop " + c + " " + number_of_outcasts + " " + previous_number_of_outcasts)
+
+        if (Math.abs(number_of_outcasts - previous_number_of_outcasts) == 0) {
+          //println("loop " + c + " " + number_of_outcasts + " " + previous_number_of_outcasts)
+          C = c
+          loop.break()
+        }
+        previous_number_of_outcasts = number_of_outcasts
+      }
+    }
+    println("C_max: " + C_max)
+    println("C: " + C)
+    val OC = outBorder.filter(outBorder("radiusNeighbors") >= C)
+    //OC.show
+    println("OC count: " + OC.count)
+    val Pused = outBorder.filter(outBorder("radiusNeighbors") < C)
+    println("Pused count: " + Pused.count)
+    Pused.show
+
+    /*if (Math.abs(number_of_outcasts - previous_number_of_outcasts) < best_diff) {
+      best_diff = Math.abs(number_of_outcasts - previous_number_of_outcasts)
+    }
+    C = number_of_outcasts
+    previous_number_of_outcasts = number_of_outcasts
+
+    println("found C: " + C)
+    println("C_max: " + C_max)*/
 
     /*
-    # finding the first minority neighbor of minority samples
-          nn= NearestNeighbors(n_neighbors= 2, n_jobs= self.n_jobs)
-          nn.fit(X_min)
-          dist, ind= nn.kneighbors(X_min)
-  
-          # extracting the distances of first minority neighbors from minority samples
-          first_pos_neighbor_distances= dist[:,1]
-  
-    # extracting the number of majority samples in the neighborhood of minority samples
-          out_border= []
-          for i in range(len(X_min)):
-              ind= nn.radius_neighbors(X_min[i].reshape(1, -1), first_pos_neighbor_distances[i], return_distance= False)
-              out_border.append(np.sum(y[ind[0]] == self.majority_label))
-  
-          out_border= np.array(out_border)
-  
+        out_border= np.array(out_border)
+
+        # finding the optimal C value by comparing the number of outcast minority
+        # samples when traversing the range [1, C_max]
+        n_oc_m1= -1
+        C= 0
+        best_diff= np.inf
+        for c in range(1, C_max):
+            n_oc= np.sum(out_border >= c)
+            if abs(n_oc - n_oc_m1) < best_diff:
+                best_diff= abs(n_oc - n_oc_m1)
+                C= n_oc
+            n_oc_m1= n_oc
+
+        # determining the set of minority samples Pused
+        Pused= np.where(out_border < C)[0]
+
+        # Adaptive neighbor SMOTE algorithm
+
+        # checking if there are minority samples left
+        if len(Pused) == 0:
+            _logger.info(self.__class__.__name__ + ": " + "Pused is empty")
+            return X.copy(), y.copy()
+
+        # finding the maximum distances of first positive neighbors
+        eps= np.max(first_pos_neighbor_distances[Pused])
+
+        # fitting nearest neighbors model to find nearest minority samples in
+        # the neighborhoods of minority samples
+        nn= NearestNeighbors(n_neighbors= 1, n_jobs= self.n_jobs)
+        nn.fit(X_min[Pused])
+        ind= nn.radius_neighbors(X_min[Pused], eps, return_distance= False)
+
+        # extracting the number of positive samples in the neighborhoods
+        Np= np.array([len(i) for i in ind])
+
+        if np.all(Np == 1):
+            _logger.warning(self.__class__.__name__ + ": " + "all samples have only 1 neighbor in the given radius")
+            return X.copy(), y.copy()
+
+        # determining the distribution used to generate samples
+        distribution= Np/np.sum(Np)
+
+        # generating samples
+        samples= []
+        while len(samples) < num_to_sample:
+            random_idx= self.random_state.choice(np.arange(len(Pused)), p= distribution)
+            if len(ind[random_idx]) > 1:
+                random_neighbor_idx= self.random_state.choice(ind[random_idx])
+                while random_neighbor_idx == random_idx:
+                    random_neighbor_idx= self.random_state.choice(ind[random_idx])
+                samples.append(self.sample_between_points(X_min[Pused[random_idx]], X_min[Pused[random_neighbor_idx]]))
+
    */
 
 

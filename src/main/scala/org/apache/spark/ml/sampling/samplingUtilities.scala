@@ -5,6 +5,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.{count, udf}
 import org.apache.spark.sql.types.StructField
 import org.apache.spark.sql._
+import org.apache.spark.sql.expressions.UserDefinedFunction
 
 import scala.collection.mutable
 
@@ -24,7 +25,8 @@ object utils {
     spark.createDataFrame(rdd)
   }
 
-  val getMatchingClassCount = udf((array: mutable.WrappedArray[Int], minorityClassLabel: Int) => {
+  // FIXME - this is for cases with self neighbors
+  val getMatchingClassCount: UserDefinedFunction = udf((array: mutable.WrappedArray[Int], minorityClassLabel: Int) => {
     def isMajorityNeighbor(x1: Int, x2: Int): Int = {
       if(x1 == x2) {
         1
@@ -40,7 +42,7 @@ object utils {
     val combined = Array[Array[Double]](x1, x2)
     // val difference: Array[Double] = combined.transpose.map(x=>Math.abs(x(0)-x(1)))
     // difference.sum
-    val difference: Array[Double] = combined.transpose.map(x=>Math.pow(x(0)-x(1), 2))
+    val difference: Array[Double] = combined.transpose.map(x=>Math.pow(x(1)-x(0), 2))
     Math.sqrt(difference.sum)
   }
 

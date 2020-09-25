@@ -141,7 +141,7 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
 
   override def transform(dataset: Dataset[_]): DataFrame = {
     val df = dataset.toDF()
-    import df.sparkSession.implicits._
+    // import df.sparkSession.implicits._
 
     val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
     // val minClassLabel = counts.take(1)(0)(0).toString

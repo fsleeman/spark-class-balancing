@@ -217,15 +217,15 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
 
 
     val counts = getCountsByClass(dataset.sparkSession, "label", dataset.toDF).sort("_2")
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
+    // val minClassLabel = counts.take(1)(0)(0).toString
+    // val minClassCount = counts.take(1)(0)(1).toString.toInt
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
     val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    for(x<-minorityClasses) {
+    /* for(x<-minorityClasses) {
       println("minority label: " + x)
-    }
+    } */
 
     val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
 

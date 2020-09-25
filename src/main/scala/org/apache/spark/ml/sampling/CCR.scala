@@ -212,9 +212,9 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       .setSubTreeLeafSize(leafSize)
       .setK(kValue + 1) // include self example
       .setAuxCols(Array("index", "label", "features"))
-      .setQueryByDistance(false)
+      //.setQueryByDistance(false)
 
-    println(model.getQueryMode)
+    //println(model.getQueryMode)
 
     val f: KNNModel = model.fit(majorityDF)
     f.setDistanceCol("distances")

@@ -51,7 +51,7 @@ class RandomUndersampleModel private[ml](override val uid: String) extends Model
     val minClassLabel = counts.take(1)(0)(0).toString
     val minClassCount = counts.take(1)(0)(1).toString.toInt
     val labels = counts.collect().map(x=>x(0).toString.toInt)
-    labels.filter(x=>x!=minClassLabel).map(x=>dataset.filter(dataset("label")===x)).map(x=>underSample(x.toDF, minClassCount)).reduce(_ union _)
+    labels.filter(x=>x.toString!=minClassLabel).map(x=>dataset.filter(dataset("label")===x)).map(x=>underSample(x.toDF, minClassCount)).reduce(_ union _)
   }
 
   override def transformSchema(schema: StructType): StructType = {
