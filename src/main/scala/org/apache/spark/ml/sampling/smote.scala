@@ -1,12 +1,13 @@
 package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.param.{DoubleParam, ParamMap, ParamValidators, Params, Param}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+
 import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.ml.knn.{KNN, KNNModel}
@@ -16,6 +17,21 @@ import org.apache.spark.sql.functions.desc
 
 /** Transformer Parameters*/
 private[ml] trait SMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
+  /**
+    * Param for if the nearest neighbor should be based on distance, not k
+    * Default: False
+    *
+    * @group param
+    */
+  val samplingRatios = new Param[Map[String, Double]](this, "samplingRatios", "map of sampling ratios per class")
+
+  /** @group getParam */
+  def getSamplingRatios: Map[String, Double] = $(samplingRatios)
+
+  def setSamplingRatios(value: Map[String, Double]): this.type = set(samplingRatios, value)
+
+
+  setDefault(samplingRatios -> Map())
 
 }
 
@@ -66,8 +82,10 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     createdSamples
   }
 
-  override def transform(dataset: Dataset[_]): DataFrame= {
+  override def transform(dataset: Dataset[_]): DataFrame ={
+
     println("~~~~~~~~~~~~~~~~~~~~~~~~smote")
+    println($(samplingRatios))
     //val df = dataset.toDF()
     val counts = getCountsByClass(dataset.sparkSession, "label", dataset.toDF).sort("_2")
     counts.show
@@ -76,11 +94,33 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val clsList: Array[Int] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toInt)
+
+
+    val clsList: Array[Int] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toInt).take(1)
     //val clsDFs = clsList.indices.map(x=>oversample(df.filter(df("label")===clsList(x)), maxClassCount, union = true))
     //clsDFs.reduce(_ union _)
+    println("********* " + clsList(0))
+    //  FIXME - make sure algorithms that modify other datasets are done in the right order
+    // FIXME - replace with groupBy?
 
-    val clsDFs = clsList.indices.map(x=>dataset.filter(dataset("label")===clsList(x))).map(x=>oversample(x, (majorityClassCount - x.count).toInt))   //    oversample(df.filter(df("label")===clsList(x)), maxClassCount, union = true))
+
+    def getSamplesToAdd(label: String, sampleCount: Long): Int ={
+      if($(samplingRatios) contains label) {
+        val ratio = $(samplingRatios)(label)
+        if(ratio <= 1) {
+          0
+        } else {
+          ((ratio - 1.0) * sampleCount).toInt
+        }
+      } else {
+        majorityClassCount - sampleCount.toInt
+      }
+    }
+    val clsDFs = clsList.indices.map(x=>(clsList(x), dataset.filter(dataset("label")===clsList(x))))
+      .map(x=>oversample(x._2, getSamplesToAdd(x._1.toString, x._2.count)))
+      //.map(x=>oversample(x._2, (x._2.count * $(samplingRatios)(x._1.toString)).toInt))   //    oversample(df.filter(df("label")===clsList(x)), maxClassCount, union = true))
+    //val clsDFs = clsList.indices.map(x=>(clsList(x), dataset.filter(dataset("label")===clsList(x)))).map(x=>oversample(x._2, (majorityClassCount - x.count).toInt))   //    oversample(df.filter(df("label")===clsList(x)), maxClassCount, union = true))
+
     dataset.toDF.union(clsDFs.reduce(_ union _)) //fixme, not working the same between two methods
     //clsDFs.reduce(_ union _)
   }

@@ -14,6 +14,7 @@ import org.apache.spark.ml.linalg.SparseVector
 
 import scala.io.Source
 import scala.util.Random
+import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer}
 
 //FIXME - turn classes back to Ints instead of Doubles
 object Sampling {
@@ -244,6 +245,8 @@ object Sampling {
       (r._1, cls, rowMapped.reverse)
     })
 
+
+
     val results: DataFrame = data.toDF().withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
@@ -261,7 +264,14 @@ object Sampling {
       scaledData.drop("features").withColumn("features", asDense($"scaledFeatures")).drop("scaledFeatures")  //.withColumnRenamed("scaledFeatures", "features") ..
     } else { converted }.cache()
 
+    val labelName = "indexedLabel"
+    val labelIndexer = new StringIndexer()
+      .setInputCol("label")
+      .setOutputCol(labelName)
+      .fit(scaledData)
 
+
+    // FIXME - add pipeline
 
     val counts = scaledData.count()
     var splits = Array[Int]()
@@ -292,124 +302,128 @@ object Sampling {
 
       println("original size: " + trainData.count())
 
-      // Add: random oversampling, random undersampling
+      val samplingMap: Map[String, Double] =
+        Map( "1" -> 2.0,
+          //"2" -> 0.5,
+          "3" -> 2.0,
+          "4" -> 1.0,
+          "5" -> 2.0,
+          "6" -> 2.0,
+          "7" -> 2.0
 
-     /* val smote = new ClassBalancerModel()
-      val result = smote.transform(trainData)
+        /*Map( "none" -> 1.0,
+          "rRna" -> 10.0,
+          "tRna" -> 20.0,
+          "snRna" -> 20.0,
+          "mRna" -> 40.0,
+          "SRP" -> 40.0,
+          "IRES" -> 40.0*/
+        )
 
-      println("******* After train ")
-      testData.show
-      println(testData.count)
-      result.show
-      println(result.count)
+     var resultArray = Array[Array[String]]()
+     for(samplingMethod <- samplingMethods) {
+       println(samplingMethod)
+       val t0 = System.nanoTime()
+       val sampledData = if(samplingMethod == "kMeansSmote") {
+         val r = new KMeansSMOTE()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       }  else if(samplingMethod == "borderlineSmote") {
+         val r = new BorderlineSMOTE()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       }  else if(samplingMethod == "rbo") {
+         val r = new RBO()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "adasyn") {
+         val r = new ADASYN()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "safeLevel") {
+         val r = new SafeLevelSMOTE()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "smote") {
+         val r = new SMOTE
+         val model = r.fit(trainData).setSamplingRatios(samplingMap)
+         model.transform(trainData)
+       } else if(samplingMethod == "mwmote") {
+         val r = new MWMOTE()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "ccr") {
+         val r = new CCR()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "ans") {
+         val r = new ANS()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "clusterSmote") {
+         val r = new ClusterSMOTE()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "gaussianSmote") {
+         val r = new GaussianSMOTE()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "smote_d") {
+         val r = new SMOTED()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "somo") {
+         val r = new SOMO()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       } else if(samplingMethod == "nras") {
+         val r = new NRAS()
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       }  else if(samplingMethod == "randomOversample") {
+         val r = new RandomOversample() // multi-class done
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       }  else if(samplingMethod == "randomUndersample") {
+         val r = new RandomUndersample() // multi-class done
+         val model = r.fit(trainData)
+         model.transform(trainData)
+       }
+       else {
+         sampleData(spark, trainData, samplingMethod)
+       }
+       // sampledData.show
 
-      getCountsByClass(spark, "label", result).show
-         }*/
+       println("new total count: " + sampledData.count())
+       getCountsByClass(spark, "label", sampledData).show
 
-           var resultArray = Array[Array[String]]()
-           for(samplingMethod <- samplingMethods) {
-             println(samplingMethod)
-             val t0 = System.nanoTime()
-             val sampledData = if(samplingMethod == "kMeansSmote") {
-               val r = new KMeansSMOTE()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             }  else if(samplingMethod == "borderlineSmote") {
-               val r = new BorderlineSMOTE()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             }  else if(samplingMethod == "rbo") {
-               val r = new RBO()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "adasyn") {
-               val r = new ADASYN()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "safeLevel") {
-               val r = new SafeLevelSMOTE()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "smote") {
-               val r = new SMOTE // multi-class done
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "mwmote") {
-               val r = new MWMOTE()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "ccr") {
-               val r = new CCR()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "ans") {
-               val r = new ANS()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "clusterSmote") {
-               val r = new ClusterSMOTE()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "gaussianSmote") {
-               val r = new GaussianSMOTE()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "smote_d") {
-               val r = new SMOTED()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "somo") {
-               val r = new SOMO()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             } else if(samplingMethod == "nras") {
-               val r = new NRAS()
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             }  else if(samplingMethod == "randomOversample") {
-               val r = new RandomOversample() // multi-class done
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             }  else if(samplingMethod == "randomUndersample") {
-               val r = new RandomUndersample() // multi-class done
-               val model = r.fit(trainData)
-               model.transform(trainData)
-             }
-             else {
-               sampleData(spark, trainData, samplingMethod)
-             }
-             // sampledData.show
+       val t1 = System.nanoTime()
 
-             println("new total count: " + sampledData.count())
-             getCountsByClass(spark, "label", sampledData).show
+       val savePathString = savePath
+       val saveDirectory = new File(savePathString)
+       if (!saveDirectory.exists()) {
+         saveDirectory.mkdirs()
+       }
 
-             val t1 = System.nanoTime()
+       val x: Array[String] = Array(samplingMethod) ++ runClassifierMinorityType(sampledData, testData) ++ Array(((t1 - t0) / 1e9).toString)
 
-             val savePathString = savePath
-             val saveDirectory = new File(savePathString)
-             if (!saveDirectory.exists()) {
-               saveDirectory.mkdirs()
-             }
+       resultArray = resultArray :+ x
+       combinedSplitResults = combinedSplitResults :+ x
+     }
 
-             val x: Array[String] = Array(samplingMethod) ++ runClassifierMinorityType(sampledData, testData) ++ Array(((t1 - t0) / 1e9).toString)
+     val resultsDF = buildResultDF(spark, resultArray)
+     println("Split Number: " + splitIndex)
+     resultsDF.show
 
-             resultArray = resultArray :+ x
-             combinedSplitResults = combinedSplitResults :+ x
-           }
+     resultsDF.repartition(1).
+       write.format("com.databricks.spark.csv").
+       option("header", "true").
+       mode("overwrite").
+       save(savePath + "/" + splitIndex)
 
-           val resultsDF = buildResultDF(spark, resultArray)
-           println("Split Number: " + splitIndex)
-           resultsDF.show
-
-           resultsDF.repartition(1).
-             write.format("com.databricks.spark.csv").
-             option("header", "true").
-             mode("overwrite").
-             save(savePath + "/" + splitIndex)
-
-           trainData.unpersist()
-           testData.unpersist()
-         }
+     trainData.unpersist()
+     testData.unpersist()
+    }
 
     println("Total")
     val totalResults = buildResultDF(spark, combinedSplitResults)
