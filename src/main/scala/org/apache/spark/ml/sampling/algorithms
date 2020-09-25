@@ -1,4 +1,29 @@
 
+Multiclass:
+
+Random oversampling
+Random undersampling
+Borderline SMOTE
+ADASYN
+SMOTE
+kmeans
+cluster_smote
+smote_d
+ccr
+mwmote
+gaussian_smote
+
+
+Left:
+RBO - really slow?
+Safe level
+
+
+issues:
+ANS
+NRAS
+
+
 Finished:
 
 1) RBO
@@ -40,3 +65,12 @@ Possible Additional Algorithms
 (need to add distance based search for nearest neighbors) [ANS]	Siriseriwan, W and Sinapiromsaran, Krung, "Adaptive neighbor synthetic minority oversampling technique under 1NN outcast handling" , Songklanakarin Journal of Science and Technology, 2017, pp. 565-576
 
 (SVM based?) [SMOTE_PSO]	Jair Cervantes and Farid Garcia-Lamont and Lisbeth Rodriguez and Asdrúbal López and José Ruiz Castilla and Adrian Trueba, "PSO-based method for SVM classification on skewed data sets" , Neurocomputing, 2017, pp. 187 - 197
+
+
+
+Questions:
+
+Safe level: not clear if the 'n' examples should be the minority class or any class type? Python code does not appear to be correct as it performs NN on all examples and does not clear up the question for 'n'.
+
+
+
