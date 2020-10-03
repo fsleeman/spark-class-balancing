@@ -16,6 +16,8 @@ import scala.io.Source
 import scala.util.Random
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer}
 
+import scala.collection.mutable.ArrayBuffer
+
 //FIXME - turn classes back to Ints instead of Doubles
 object Sampling {
 
@@ -38,21 +40,68 @@ object Sampling {
     else { b }
   }
 
+  def printArray(a: Array[Double]) ={
+    for(x<-a) {
+      print(x + " ")
+    }
+    println("")
+  }
+
+
   def calculateClassifierResults(distinctClasses: DataFrame, confusionMatrix: DataFrame): Array[String]={//String ={
-    import distinctClasses.sparkSession.implicits._
+
     //FIXME - don't calculate twice
 
-    val classLabels = distinctClasses.collect().map(x => x.toSeq.last.toString.toDouble.toInt)
+    val classLabels = distinctClasses.collect().map(x => x.toSeq.last.toString.toDouble)
 
-    val maxLabel: Int = classLabels.max
-    val minLabel: Int = classLabels.min
+    //val maxLabel: Double = classLabels.max
+    //val minLabel: Double = classLabels.min
     val numberOfClasses = classLabels.length
-    val classCount = confusionMatrix.columns.length - 1
-    val testLabels = distinctClasses.map(_.getAs[Int]("label")).map(x => x.toInt).collect().sorted
+    //val classCount = confusionMatrix.columns.length - 1
+    //val testLabels = distinctClasses.map(_.getAs[String]("label")).map(x => x.toDouble).collect().sorted
 
-    val rows = confusionMatrix.collect.map(_.toSeq.map(_.toString))
-    val totalCount = rows.map(x => x.tail.map(y => y.toDouble.toInt).sum).sum
-    val classMaps = testLabels.zipWithIndex.map(x => (x._2, x._1))
+    val rows: Array[Array[Double]] = confusionMatrix.collect.map(_.toSeq.toArray.map(_.toString.toDouble))
+
+    for(x<-rows) {
+    //  printArray(x)
+    }
+
+    val labels = Array(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    val classMaps = rows.indices.map(x=>(rows(x).head, x)).toMap
+    println(classMaps)
+    for(x<-classMaps) {
+  //    println(x._1, x._2)
+    }
+    var updatedRows = Array[Array[Double]]()
+    for(x<-labels.indices) {
+      if(classMaps.contains(labels(x))) {
+        // println(rows(classMaps(x)).toString)
+    //    printArray(rows(classMaps(x)))
+        updatedRows = updatedRows :+ rows(classMaps(x))
+
+      } else {
+        //updatedRows +: Array[Double](labels(x)) ++ labels.indices.map(_=>0.0)
+        val emptyRow = Array[Double](labels(x), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) // Array[Double](labels(x)) ++ labels.indices.map(_=>0.0)
+        // println(emptyRow.toString)
+      //  printArray(emptyRow)
+        updatedRows = updatedRows :+ emptyRow
+
+      }
+    }
+
+    println("updated rows")
+    for(x<-updatedRows) {
+    //  printArray(x)
+    }
+
+
+    val totalCount = updatedRows.map(x => x.tail.sum).sum
+    // val classMaps: Array[(Int, Double)] = testLabels.zipWithIndex.map(x => (x._2, x._1))
+
+    /*println("classMaps")
+    for(x<-classMaps) {
+      println(x._1, x._2)
+    }*/
 
     var AvAvg = 0.0
     var MAvG = 1.0
@@ -70,14 +119,24 @@ object Sampling {
     var tpSum = 0.0
     val beta = 0.5 // User specified
 
+    //FIXME - double check updated values
+
+    //val labels = Array(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
     //FIXME - could be made parallel w/udf
-    for (clsIndex <- minLabel to maxLabel - minLabel) {
-      val colSum = rows.map(x => x(clsIndex + 1).toInt).sum
-      val rowValueSum = if (classMaps.map(x => x._2).contains(clsIndex)) rows.filter(x => x.head.toDouble.toInt == clsIndex)(0).tail.map(x => x.toDouble.toInt).sum else 0
-      val tp: Double = if (classMaps.map(x => x._2).contains(clsIndex)) rows.filter(x => x.head.toDouble.toInt == clsIndex)(0).tail(clsIndex).toDouble.toInt else 0
-      val fn: Double = colSum - tp
-      val fp: Double = rowValueSum - tp
+    //for (clsIndex <- minLabel to maxLabel - minLabel) {
+    for (clsIndex <- 0 to 6) {
+
+      val colSum = updatedRows.map(x => x.tail(clsIndex)).sum
+      // val rowValueSum = if (classMaps.map(x => x._2).contains(clsIndex)) updatedRows.filter(x => x.head == clsIndex)(0).tail.map(x => x).sum else 0
+      val rowValueSum = updatedRows(clsIndex).tail.sum
+      //println("clsIndex: " + clsIndex + " colSum: " + colSum + " rowSum: " + rowValueSum)
+      // val tp: Double = if (classMaps.map(x => x._2).contains(clsIndex)) updatedRows.filter(x => x.head == clsIndex)(0).tail(clsIndex) else 0
+      val tp: Double = updatedRows(clsIndex).tail(clsIndex)
+      val fn: Double = colSum - tp // check
+      val fp: Double = rowValueSum - tp // check
       val tn: Double = totalCount - tp - fp - fn
+
+      //println(tp + " " + tn + " " + fp + " " + fn)
 
       val recall = tp / (tp + fn)
       val precision = tp / (tp + fp)
@@ -111,16 +170,16 @@ object Sampling {
       pSum += (tp + fp)
     }
 
-    AvAvg /= classCount
+    AvAvg /= numberOfClasses
     MAvG = {  val result = Math.pow(MAvG, 1/numberOfClasses.toDouble); if(result.isNaN) 0.0 else result } //Math.pow((MAvG), (1/numberOfClasses.toDouble))
-    RecM /= classCount
-    PrecM /= classCount
+    RecM /= numberOfClasses
+    PrecM /= numberOfClasses
     Recu = tpSum / tSum
     Precu = tpSum / pSum
     FbM = { val result = ((1 + Math.pow(beta, 2.0)) * PrecM * RecM) / (Math.pow(beta, 2.0) * PrecM + RecM); if(result.isNaN) 0.0 else result }
     Fbu = { val result = ((1 + Math.pow(beta, 2.0)) * Precu * Recu) / (Math.pow(beta, 2.0) * Precu + Recu); if(result.isNaN) 0.0 else result }
-    AvFb /= classCount
-    CBA /= classCount
+    AvFb /= numberOfClasses
+    CBA /= numberOfClasses
 
     Array(AvAvg.toString, MAvG.toString, RecM.toString, PrecM.toString, Recu.toString, Precu.toString, FbM.toString, Fbu.toString, AvFb.toString, CBA.toString)
   }
@@ -132,7 +191,7 @@ object Sampling {
     //val samplesToAdd = numSamples - df.count()
     val currentCount = df.count()
     if (0 < currentCount && currentCount < numSamples) {
-      val currentSamples = df.sample(true, (numSamples - currentCount) / currentCount.toDouble).collect()
+      val currentSamples = df.sample(withReplacement = true, (numSamples - currentCount) / currentCount.toDouble).collect()
       samples = samples ++ currentSamples
     }
 
@@ -146,7 +205,7 @@ object Sampling {
 
     val underSampleRatio = numSamples / df.count().toDouble
     if (underSampleRatio < 1.0) {
-      val currentSamples = df.sample(false, underSampleRatio, seed = 42L).collect()
+      val currentSamples = df.sample(withReplacement = false, underSampleRatio, seed = 42L).collect()
       samples = samples ++ currentSamples
       val foo = spark.sparkContext.parallelize(samples)
       val x = spark.sqlContext.createDataFrame(foo, df.schema)
@@ -237,9 +296,9 @@ object Sampling {
 
     val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
 
-    val data: RDD[(Long, Int, Array[Double])] = train_index.map({ r =>
+    val data: RDD[(Long, String, Array[Double])] = train_index.map({ r =>
       val array = r._2.toSeq.toArray.reverse
-      val cls = array.head.toString.toDouble.toInt
+      val cls = array.head.toString
       val rowMapped: Array[Double] = array.tail.map(_.toString.toDouble)
       //NOTE - This needs to be back in the original order to train/test works correctly
       (r._1, cls, rowMapped.reverse)
@@ -265,10 +324,7 @@ object Sampling {
     } else { converted }.cache()
 
     val labelName = "indexedLabel"
-    val labelIndexer = new StringIndexer()
-      .setInputCol("label")
-      .setOutputCol(labelName)
-      .fit(scaledData)
+
 
 
     // FIXME - add pipeline
@@ -304,7 +360,7 @@ object Sampling {
 
       val samplingMap: Map[String, Double] =
         Map( "1" -> 2.0,
-          //"2" -> 0.5,
+          "2" -> 0.5,
           "3" -> 2.0,
           "4" -> 1.0,
           "5" -> 2.0,
@@ -346,7 +402,7 @@ object Sampling {
          model.transform(trainData)
        } else if(samplingMethod == "smote") {
          val r = new SMOTE
-         val model = r.fit(trainData).setSamplingRatios(samplingMap)
+         val model = r.fit(trainData)//.setSamplingRatios(samplingMap)
          model.transform(trainData)
        } else if(samplingMethod == "mwmote") {
          val r = new MWMOTE()
@@ -442,6 +498,12 @@ object Sampling {
 
   def buildResultDF(spark: SparkSession, resultArray: Array[Array[String]] ): DataFrame = {
     import spark.implicits._
+
+    for(x<-resultArray.indices) {
+      for(y<-resultArray(x).indices) {
+        //println(y)
+      }
+    }
     val csvResults = resultArray.map(x => x match {
       case Array(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11) => (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11)
     }).toSeq
@@ -470,11 +532,20 @@ object Sampling {
   }
 
   def runClassifierMinorityType(train: DataFrame, test: DataFrame): Array[String] ={
-    val spark = train.sparkSession
+    val indexer = new StringIndexer()
+      .setInputCol("label")
+      .setOutputCol("labelIndexed")
+
+
+    val indexerModel = indexer.fit(train)
+    val indexedTrain = indexerModel.transform(train).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label")
+    val indexedTest = indexerModel.transform(test).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label")
+
+    //val spark = train.sparkSession
     //FIXME - don't collect twice
-    val maxLabel: Int = test.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble.toInt).max
-    val minLabel: Int = test.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble.toInt).min
-    val inputCols = test.columns.filter(_ != "label")
+    //val maxLabel: Double = indexedTest.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble).max
+    //val minLabel: Double = indexedTest.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble).min
+    // val inputCols = test.columns.filter(_ != "label")
 
     val classifier = new RandomForestClassifier().setNumTrees(10).
       setSeed(42L).
@@ -482,17 +553,25 @@ object Sampling {
       setFeaturesCol("features").
       setPredictionCol("prediction")
 
-    val model = classifier.fit(train)
-    val predictions = model.transform(test)
+    indexedTrain.show
 
-    val confusionMatrix: Dataset[Row] = predictions.
-      groupBy("label").
-      pivot("prediction", minLabel to maxLabel).
+
+    val model = classifier.fit(indexedTrain)
+    val predictions: DataFrame = model.transform(indexedTest)
+
+        val labels = Array(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+
+    val confusionMatrix: Dataset[Row] = predictions.groupBy("label").
+      pivot("prediction", labels).
       count().
       na.fill(0.0).
       orderBy("label")
 
+    confusionMatrix.show
+
+
     calculateClassifierResults(test.select("label").distinct(), confusionMatrix)
+    //Array[String]()
   }
 
 
