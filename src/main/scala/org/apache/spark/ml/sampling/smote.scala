@@ -1,8 +1,9 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.param.{DoubleParam, ParamMap, ParamValidators, Params, Param}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.{DoubleParam, Param, ParamMap, ParamValidators, Params}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasInputCols, HasOutputCol, HasSeed}
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
@@ -11,118 +12,86 @@ import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.ml.knn.{KNN, KNNModel}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
-import org.apache.spark.sql.functions.desc
+import org.apache.spark.sql.functions.{desc, udf}
 
 
 /** Transformer Parameters*/
-private[ml] trait SMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
-  /**
-    * Param for if the nearest neighbor should be based on distance, not k
-    * Default: False
-    *
-    * @group param
-    */
-  val samplingRatios = new Param[Map[String, Double]](this, "samplingRatios", "map of sampling ratios per class")
-
-  /** @group getParam */
-  def getSamplingRatios: Map[String, Double] = $(samplingRatios)
-
-  def setSamplingRatios(value: Map[String, Double]): this.type = set(samplingRatios, value)
-
-
-  setDefault(samplingRatios -> Map())
+private[ml] trait SMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
 
 }
 
 /** Transformer */
 class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel] with SMOTEModelParams {
-  def this() = this(Identifiable.randomUID("SMOTE"))
+  def this() = this(Identifiable.randomUID("smote"))
 
   def getSmoteSample(row: Row): Row = {
-    val index = row(0).toString.toLong
-    val label = row(1).toString.toInt
-    val features: Array[Double] = row(2).asInstanceOf[DenseVector].toArray
-    val neighbors = row(3).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail
+    val label = row(0).toString.toDouble
+    val features: Array[Double] = row(1).asInstanceOf[DenseVector].toArray
+    val neighbors = row(2).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail
     val randomNeighbor: Array[Double] = neighbors(Random.nextInt(neighbors.length)).toArray
 
     val gap = randomNeighbor.indices.map(_=>Random.nextDouble()).toArray // FIXME - should this be one value instead?
-
     val syntheticExample = Vectors.dense(Array(features, randomNeighbor, gap).transpose.map(x=>x(0) + x(2) * (x(1)-x(0)))).toDense
 
-    Row(index, label, syntheticExample)
+    Row(label, syntheticExample)
   }
 
   def oversample(df: Dataset[_], samplesToAdd: Int): DataFrame = {
     val spark = df.sparkSession
     import spark.implicits._
 
-    val leafSize = 100
-    val kValue = 5
+    val model = new KNN().setFeaturesCol($(featuresCol))
+      .setTopTreeSize($(topTreeSize))
+      .setTopTreeLeafSize($(topTreeLeafSize))
+      .setSubTreeLeafSize($(subTreeLeafSize))
+      .setK($(k) + 1) // include self example
+      .setAuxCols(Array($(labelCol), $(featuresCol)))
+      .setBalanceThreshold($(balanceThreshold))
 
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
-      .setTopTreeLeafSize(leafSize)
-      .setSubTreeLeafSize(leafSize)
-      .setK(kValue + 1) // include self example
-      .setAuxCols(Array("label", "features"))
+    val knnModel: KNNModel = model.fit(df)
+    val nearestNeighborDF = knnModel.transform(df)
 
-    val f: KNNModel = model.fit(df)
-
-    val t = f.transform(df).sort("index")
-    println("*** first knn ****")
-    t.show
-
-    val dfCount = t.count.toInt
-    //val randomIndicies = (0 until totalSamples - dfCount).map(_=>Random.nextInt(dfCount))
+    val dfCount = nearestNeighborDF.count.toInt
     val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(dfCount))
-    val collected = t.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
-    val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), df.schema).sort("index")
+    val collected = nearestNeighborDF.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
 
-    createdSamples
+    spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), df.schema)
   }
 
   override def transform(dataset: Dataset[_]): DataFrame ={
 
-    println("~~~~~~~~~~~~~~~~~~~~~~~~smote")
-    println($(samplingRatios))
-    //val df = dataset.toDF()
-    val counts = getCountsByClass(dataset.sparkSession, "label", dataset.toDF).sort("_2")
-    counts.show
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
+
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
+
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
+    val clsList: Array[String] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString)
 
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+      .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    val clsList: Array[Int] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toInt).take(1)
-    //val clsDFs = clsList.indices.map(x=>oversample(df.filter(df("label")===clsList(x)), maxClassCount, union = true))
-    //clsDFs.reduce(_ union _)
-    println("********* " + clsList(0))
-    //  FIXME - make sure algorithms that modify other datasets are done in the right order
-    // FIXME - replace with groupBy?
+    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-
-    def getSamplesToAdd(label: String, sampleCount: Long): Int ={
-      if($(samplingRatios) contains label) {
-        val ratio = $(samplingRatios)(label)
-        if(ratio <= 1) {
-          0
-        } else {
-          ((ratio - 1.0) * sampleCount).toInt
-        }
-      } else {
-        majorityClassCount - sampleCount.toInt
-      }
-    }
-    val clsDFs = clsList.indices.map(x=>(clsList(x), dataset.filter(dataset("label")===clsList(x))))
-      .map(x=>oversample(x._2, getSamplesToAdd(x._1.toString, x._2.count)))
-      //.map(x=>oversample(x._2, (x._2.count * $(samplingRatios)(x._1.toString)).toInt))   //    oversample(df.filter(df("label")===clsList(x)), maxClassCount, union = true))
-    //val clsDFs = clsList.indices.map(x=>(clsList(x), dataset.filter(dataset("label")===clsList(x)))).map(x=>oversample(x._2, (majorityClassCount - x.count).toInt))   //    oversample(df.filter(df("label")===clsList(x)), maxClassCount, union = true))
-
-    dataset.toDF.union(clsDFs.reduce(_ union _)) //fixme, not working the same between two methods
-    //clsDFs.reduce(_ union _)
+    val restored = balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
+    restored
   }
 
   override def transformSchema(schema: StructType): StructType = {
