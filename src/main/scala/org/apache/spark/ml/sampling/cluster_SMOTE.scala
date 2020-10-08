@@ -2,13 +2,15 @@ package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.clustering.KMeans
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.sql.functions.desc
+import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
@@ -17,15 +19,23 @@ import scala.util.Random
 
 
 /** Transformer Parameters*/
-private[ml] trait ClusterSMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait ClusterSMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
+  /**
+    * Param for kNN k-value.
+    * @group param
+    */
+  final val clusterK: Param[Int] = new Param[Int](this, "clusterK", "cluster k-value for kNN")
 
+  /** @group getParam */
+  final def setClusterK(value: Int): this.type = set(clusterK, value)
+
+  setDefault(clusterK -> 5)
 }
 
 /** Transformer */
 class ClusterSMOTEModel private[ml](override val uid: String) extends Model[ClusterSMOTEModel] with ClusterSMOTEModelParams {
   def this() = this(Identifiable.randomUID("clusterSmote"))
 
-  val knnK = 5
   var knnClusters: Array[Array[Row]] = Array[Array[Row]]()
   var knnClusterCounts: Array[Int] = Array[Int]()
 
@@ -34,7 +44,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val features = row(1).asInstanceOf[mutable.WrappedArray[DenseVector]]
 
     val aSample = features(0).toArray
-    val bSample = features(Random.nextInt(knnK + 1)).toArray
+    val bSample = features(Random.nextInt($(k) + 1)).toArray // FIXME - check
     val offset = Random.nextDouble()
 
     /// FIXME - check ALL distance calculations
@@ -45,24 +55,22 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     df.show()
     import spark.implicits._
 
-    val leafSize = 10 // FIXME
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(2) /// FIXME - check? // df.count().toInt / 2
-      .setTopTreeLeafSize(leafSize)
-      .setSubTreeLeafSize(leafSize)
-      .setK(knnK + 1) // include self example
-      .setAuxCols(Array("label", "features"))
-    println(model.getBalanceThreshold)
-    println(model.getBufferSize)
+    val model = new KNN().setFeaturesCol($(featuresCol))
+      .setTopTreeSize($(topTreeSize))
+      .setTopTreeLeafSize($(topTreeLeafSize))
+      .setSubTreeLeafSize($(subTreeLeafSize))
+      .setK($(k) + 1) // include self example
+      .setAuxCols(Array($(labelCol), $(featuresCol)))
+      .setBalanceThreshold($(balanceThreshold))
 
     if(model.getBufferSize < 0.0) {
-      val model = new KNN().setFeaturesCol("features")
-        .setTopTreeSize(2) /// FIXME - check? df.count().toInt / 8
-        .setTopTreeLeafSize(leafSize)
-        .setSubTreeLeafSize(leafSize)
-        .setBalanceThreshold(0.0) // Fixes issue with smaller clusters
-        .setK(knnK + 1) // include self example
-        .setAuxCols(Array("label", "features"))
+      val model = new KNN().setFeaturesCol($(featuresCol))
+        .setTopTreeSize($(topTreeSize))
+        .setTopTreeLeafSize($(topTreeLeafSize))
+        .setSubTreeLeafSize($(subTreeLeafSize))
+        .setK($(k) + 1) // include self example
+        .setAuxCols(Array($(labelCol), $(featuresCol)))
+        .setBalanceThreshold($(balanceThreshold))
       val f = model.fit(df)
       f.transform(df).withColumn("neighborFeatures", $"neighbors.features")
     } else {
@@ -71,52 +79,56 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     }
   }
 
-  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame ={
-    val clusterK = 5 // FIXME
-    println("Samples to add: " + samplesToAdd)
+  def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame ={
     val spark = dataset.sparkSession
 
-    val minorityDF = dataset.filter(dataset("label")===minorityClassLabel)
-
-    val kValue = clusterK // Math.min(minorityClassLabel.toInt, clusterK)
-    val kmeans = new KMeans().setK(kValue).setSeed(1L) // FIXME - fix seed
-    val model = kmeans.fit(minorityDF)
+    val minorityDF = dataset.filter(dataset($(labelCol))===minorityClassLabel)
+    val kMeans = new KMeans().setK($(clusterK)).setSeed(1L) // FIXME - fix seed
+    val model = kMeans.fit(minorityDF)
     val predictions = model.transform(minorityDF)
 
-    val clusters = (0 until clusterK).map(x=>predictions.filter(predictions("prediction")===x)).filter(x=>x.count()>0).toArray
+    val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x)).filter(x=>x.count()>0).toArray
 
     // knn for each cluster
-    knnClusters =  clusters.map(x=>calculateKnnByCluster(spark, x).select("label", "neighborFeatures").collect)
+    knnClusters =  clusters.map(x=>calculateKnnByCluster(spark, x).select($(labelCol), "neighborFeatures").collect)
     knnClusterCounts = knnClusters.map(x=>x.length)
 
     val randomIndicies = (0 until samplesToAdd).map(_ => Random.nextInt(clusters.length))
-    val addedSamples = randomIndicies.map(x=>(0.toLong, minorityClassLabel.toInt, createSample(x))).toArray
+    val addedSamples = randomIndicies.map(x=>Row(minorityClassLabel, createSample(x))).toArray
 
-    val dfAddedSamples = spark.createDataFrame(spark.sparkContext.parallelize(addedSamples))
-      .withColumnRenamed("_1", "index")
-      .withColumnRenamed("_2", "label")
-      .withColumnRenamed("_3", "features")
-
-    dataset.printSchema()
-    dfAddedSamples.printSchema()
-    dfAddedSamples
+    spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(addedSamples), dataset.schema)
   }
 
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    val df = dataset.toDF()
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
 
-    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
 
-    println("dataset: " + dataset.count)
-    println("added: " + results.count)
+    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    results
+    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
+
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
@@ -130,7 +142,6 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
 
 }
 
-
 /** Estimator Parameters*/
 private[ml] trait ClusterSMOTEParams extends ClusterSMOTEModelParams with HasSeed {
 
@@ -141,7 +152,7 @@ private[ml] trait ClusterSMOTEParams extends ClusterSMOTEModelParams with HasSee
 
 /** Estimator */
 class ClusterSMOTE(override val uid: String) extends Estimator[ClusterSMOTEModel] with ClusterSMOTEParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("clusterSmote"))
 
   override def fit(dataset: Dataset[_]): ClusterSMOTEModel = {
     val model = new ClusterSMOTEModel(uid).setParent(this)
