@@ -2,6 +2,7 @@ package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml._
 import org.apache.spark.ml.clustering.KMeans
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, VectorUDT, Vectors}
 import org.apache.spark.ml.param._
@@ -12,6 +13,7 @@ import org.apache.spark.sql.functions.{col, desc, udf}
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.ml.sampling.Sampling._
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 
 import scala.collection.mutable
@@ -21,55 +23,32 @@ import org.apache.spark.mllib.linalg.{DenseMatrix => OldDenseMatrix, DenseVector
 
 import scala.util.Random
 
-/*private [sampling] trait KMeansSMOTE extends Params with HasInputCol with HasOutputCol{
-  protected def validateAndTransformSchema(schema: StructType): StructType = {
-    SchemaUtils.checkColumnType(schema, $(inputCol), new VectorUDT)
-    require(!schema.fieldNames.contains($(outputCol)),
-      s"Output column ${$(outputCol)} already exists.")
-    val outputFields = schema.fields :+ StructField($(outputCol), new VectorUDT, false)
-    StructType(outputFields)
-  }
-}
-
-private [sampling] trait KMeansSMOTEModelParams extends KMeansSMOTE {
-
-}*/
-
-
-
-/*
-class KMeansSMOTE (override val uid: String)
-extends Estimator[KMeansSMOTEModel] with KMeansSMOTE with DefaultParamsWritable {
-
-  override def fit(dataset: Dataset[_]): KMeansSMOTEModelParams = {
-    transformSchema(dataset.schema, logging = true)
-    val input: RDD[OldVector] = dataset.select($(inputCol)).rdd.map {
-      case Row(v: Vector) => OldVectors.fromML(v)
-    }
-    val pca = new sampling.KMeansSMOTE() // k = $(k)
-    val pcaModel = pca.fit(input)
-    copyValues(new KMeansSMOTEModel().setParent(this))
-  }
-
-  override def transformSchema(schema: StructType): StructType = {
-    validateAndTransformSchema(schema)
-  }
-}*/
-
-
-
-
-
-
-
 /** Transformer Parameters*/
-private[ml] trait KMeansSMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait KMeansSMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
+  /**
+    * Param for kNN k-value.
+    * @group param
+    */
+  final val clusterK: Param[Int] = new Param[Int](this, "clusterK", "cluster k-value for kNN")
 
+  /** @group getParam */
+  final def setClusterK(value: Int): this.type = set(clusterK, value)
+
+  /**
+    * Param for imbalance ratio threshold.
+    * @group param
+    */
+  final val imbalanceRatioThreshold: Param[Double] = new Param[Double](this, "imbalanceRatioThreshold", "imbalance ratio threshold")
+
+  /** @group getParam */
+  final def setImbalanceRatioThreshold(value: Double): this.type = set(imbalanceRatioThreshold, value)
+
+  setDefault(clusterK -> 5, imbalanceRatioThreshold -> 10.0)
 }
 
 /** Transformer */
 class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMeansSMOTEModel] with KMeansSMOTEModelParams {
-  def this() = this(Identifiable.randomUID("classBalancer"))
+  def this() = this(Identifiable.randomUID("kmeanssmote"))
 
   private def getFeaturePoint(ax: Double, bx: Double) : Double ={
     Random.nextDouble() * (maxValue(ax, bx) - minValue(ax, bx)) + minValue(ax, bx)
@@ -86,32 +65,31 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
   }
 
   /// FIXME - check parameters
-  private def sampleCluster(df: DataFrame, cls: Int, samplesToAdd: Int): Array[Row] = {
+  /* private def sampleCluster(df: DataFrame, cls: Int, samplesToAdd: Int): Array[Row] = {
 
-    val leafSize = 100
-    val kValue = 5
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
-      .setTopTreeLeafSize(leafSize)
-      .setSubTreeLeafSize(leafSize)
-      .setK(kValue + 1) // include self example
-      .setAuxCols(Array("label", "features"))
+    val model = new KNN().setFeaturesCol($(featuresCol))
+      .setTopTreeSize($(topTreeSize))
+      .setTopTreeLeafSize($(topTreeLeafSize))
+      .setSubTreeLeafSize($(subTreeLeafSize))
+      .setK($(k) + 1) // include self example
+      .setAuxCols(Array($(labelCol), $(featuresCol)))
+      .setBalanceThreshold($(balanceThreshold))
 
-    val f: KNNModel = model.fit(df)
-    val t = f.transform(df)
-    t.show
+    val fitModel: KNNModel = model.fit(df)
+    val neighborsDF = fitModel.transform(df)
+    neighborsDF.show
 
-    val collected = t.collect()
+    val collected = neighborsDF.collect()
     val count = df.count.toInt
 
     // examples/k neighbors/features of Doubles
-    val examples: Array[Array[Array[Double]]] = collected.map(x=>x(4).toString.substring(13, x(4).toString.length - 3).split("]], ").map(x=>x.split(""",\[""")(1)).map(y=>y.split(",").map(z=>z.toDouble)))
+    val examples: Array[Array[Array[Double]]] = collected.map(x=>x(4).toString.substring(13, x(4).toString.length - 3).split("]], ").map(x=>x.split(""",\[""")(1)).map(y=>y.split(",").map(z=>z.toDouble))) // FIMXE
     val randomIndicies = (0 to samplesToAdd).map(_ => Random.nextInt(count))
 
     val syntheticExamples = randomIndicies.par.map(x=>getSmoteExample(examples(x))).toArray
 
     syntheticExamples.map(x=>Row(0, cls, Vectors.dense(x)))
-  }
+  } */
 
   val toArr: Any => Array[Double] = _.asInstanceOf[DenseVector].toArray
   val toArrUdf: UserDefinedFunction = udf(toArr)
@@ -126,7 +104,7 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     // data.show()
     data.printSchema()
     // FIXME - use dataset schema access method
-    val collected: Array[Array[Double]] =  data.withColumn("features", toArrUdf(col("features"))).select("features").collect().map(x=>x.toString.substring(14, x.toString.length-2).split(",").map(x=>x.toDouble))
+    val collected: Array[Array[Double]] =  data.withColumn($(featuresCol), toArrUdf(col($(featuresCol)))).select($(featuresCol)).collect().map(x=>x.toString.substring(14, x.toString.length-2).split(",").map(x=>x.toDouble)) // FIXME
     val n = collected.length // number of minority examples in cluster
     val m = collected(0).length // number of features
     val meanDistance = collected.map(x=>getTotalElementDistance(x, collected)).sum / ((n * n) - n)
@@ -143,10 +121,9 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     distance
   }
 
-  private def getImbalancedRatio(spark: SparkSession, data: Dataset[Row], minClassLabel: String): Double = {
-    val minorityCount = data.filter(data("label") === minClassLabel).count
-    val majorityCount = data.filter(data("label") =!= minClassLabel).count
-    // (minorityCount + 1) / (majorityCount + 1).toDouble
+  private def getImbalancedRatio(spark: SparkSession, data: Dataset[Row], minClassLabel: Double): Double = {
+    val minorityCount = data.filter(data($(labelCol)) === minClassLabel).count
+    val majorityCount = data.filter(data($(labelCol)) =!= minClassLabel).count
     (majorityCount + 1) / (minorityCount + 1).toDouble
   }
 
@@ -155,14 +132,14 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
   }
 
   private def getAverageDistance(df: DataFrame): Double ={
-    val collected = df.select("features").collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)
+    val collected = df.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)
     collected.map(x=>getInstanceAverageDistance(x, collected)).sum / collected.length.toDouble
   }
 
   def sampleCluster(df: DataFrame, samplesToAdd: Int): DataFrame ={
     if(df.count > 1) {
       val r = new SMOTE
-      val model = r.fit(df)
+      val model = r.fit(df).setBalanceThreshold(0.0) // FIXME - pass parameters
       model.oversample(df, samplesToAdd)
     } else {
       df
@@ -170,55 +147,60 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
   }
 
   // fixme - issue with some parameter settings resulting in no clusters for oversampling
-  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame = {
-    val df = dataset.toDF//filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
-    val minorityDF = df.filter(df("label") === minorityClassLabel)
-    val majorityDF = df.filter(df("label") =!= minorityClassLabel)
-    val minorityClassCount = minorityDF.count
-    val majorityClassCount = majorityDF.count
+  def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
+    println("Adding samples... " + samplesToAdd)
 
-
-    val k = 5 // FIXME
-    val imbalanceRatioThreshold = 10.0 // FIXME - make parameter
-    val kSmote = 5          // FIXME - make parameter
-    val numberOfFeatures = df.select("features").take(1)(0)(0).asInstanceOf[DenseVector].size
+    val numberOfFeatures = dataset.select($(featuresCol)).take(1)(0)(0).asInstanceOf[DenseVector].size
     println("number of Features : " + numberOfFeatures)
 
-    val spark = df.sparkSession
-    //val counts = getCountsByClass(spark, "label", df).sort("_2")
-    //val minClassLabel = counts.take(1)(0)(0).toString
-    //val minClassCount = counts.take(1)(0)(1).toString.toInt
-    //val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    //val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
-
-    //val samplesToAdd = maxClassCount - minClassCount
-    println("Samples to add: " + samplesToAdd)
+    val spark = dataset.sparkSession
 
     // STEP 1
-    val kmeans = new KMeans().setK(kSmote).setSeed(1L) // FIXME - fix seed
-    val model = kmeans.fit(df)
-    val predictions = model.transform(df)
+    val kmeans = new KMeans().setK($(clusterK))//.setSeed(1L) // FIXME - fix seed
+    val model = kmeans.fit(dataset)
+    val predictions = model.transform(dataset)
 
-    val clusters = (0 until k).map(x=>predictions.filter(predictions("prediction")===x).drop("prediction")).toArray
+    val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x).drop("prediction")).toArray
 
     val imbalancedRatios: Array[Double] = clusters.map(x=>getImbalancedRatio(spark, x, minorityClassLabel))
 
-    val filteredClusters = (0 until k).map(x=>(imbalancedRatios(x), clusters(x))).filter(x=>x._1 < imbalanceRatioThreshold).map(x=>x._2).map(x=>x.filter(x("label")===minorityClassLabel))
+    val filteredClusters = (0 until $(clusterK)).map(x=>(imbalancedRatios(x), clusters(x))).filter(x=>x._1 < $(imbalanceRatioThreshold)).map(x=>x._2).map(x=>x.filter(x($(labelCol))===minorityClassLabel))
     println("^^^^^^ legnth: " + filteredClusters.length)
 
     val averageDistances = filteredClusters.indices.map(x=>getAverageDistance(filteredClusters(x))).toArray
     for(x<-averageDistances) {
+      println("avg distance: " + x)
+    }
+
+    for(x<-filteredClusters.indices) {
+      println("cluster count: " + filteredClusters(x).count)
+    }
+    // FIXME, this doesnt really work with high dimensional data
+    val densities = filteredClusters.indices.map(x=>filteredClusters(x).count.toDouble / Math.pow(averageDistances(x), numberOfFeatures))
+    for(x<-densities) {
+      println("densities: " + x)
+    }
+    val sparsities = densities.indices.map(x=>1/densities(x))
+
+    for(x<-sparsities) {
+      println("sparsities: " + x)
+    }
+
+    val clusterWeights = sparsities.indices.map(x=>sparsities(x)/sparsities.sum)
+
+    for(x<-clusterWeights) {
+      println("cluster weight: " + x)
+    }
+
+    val clusterSamples = clusterWeights.indices.map(x=>(samplesToAdd*clusterWeights(x)).toInt)
+
+    println("Counts")
+    for(x<-clusterSamples) {
       println(x)
     }
 
-    val densities = filteredClusters.indices.map(x=>filteredClusters(x).count / Math.pow(averageDistances(x), numberOfFeatures))
-    val sparsities = densities.indices.map(x=>1/densities(x))
-
-    val clusterWeights = sparsities.indices.map(x=>sparsities(x)/sparsities.sum)
-    val clusterSamples = clusterWeights.indices.map(x=>(samplesToAdd*clusterWeights(x)).toInt)
-
     //df.union(filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).reduce(_ union _))
-    val xx = filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).toArray// .reduce(_ union _)
+    val xx = filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).toArray // .reduce(_ union _)
     println("length: " + xx.length)
     for(x<-xx) {
       println("count: " + x.count())
@@ -233,24 +215,34 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
 
     // val densityExponent = 10 // FIXME - number of features, make parameter as well?
 
+      val indexer = new StringIndexer()
+        .setInputCol($(labelCol))
+        .setOutputCol("labelIndexed")
 
-    val df = dataset.toDF()
-    // import df.sparkSession.implicits._
+      val datasetIndexed = indexer.fit(dataset).transform(dataset)
+        .withColumnRenamed($(labelCol), "originalLabel")
+        .withColumnRenamed("labelIndexed",  $(labelCol))
+      datasetIndexed.show()
+      datasetIndexed.printSchema()
 
-    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
-    // val minClassLabel = counts.take(1)(0)(0).toString
-    // val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+      val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+      val labelMapReversed = labelMap.map(x=>(x._2, x._1))
 
+      val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+      val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
+      val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+      val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+      val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
-    println("dataset: " + dataset.count)
-    println("added: " + results.count)
+      val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+        .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    results
+      val balancedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+      val restoreLabel = udf((label: Double) => labelMapReversed(label))
+
+      balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
+        .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
@@ -264,9 +256,6 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
 
 }
 
-
-
-
 /** Estimator Parameters*/
 private[ml] trait KMeansSMOTEParams extends KMeansSMOTEModelParams with HasSeed {
 
@@ -277,7 +266,7 @@ private[ml] trait KMeansSMOTEParams extends KMeansSMOTEModelParams with HasSeed 
 
 /** Estimator */
 class KMeansSMOTE(override val uid: String) extends Estimator[KMeansSMOTEModel] with KMeansSMOTEParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("kmeanssmote"))
 
   override def fit(dataset: Dataset[_]): KMeansSMOTEModel = {
     val model = new KMeansSMOTEModel(uid).setParent(this)
