@@ -2,32 +2,31 @@ package org.apache.spark.ml.sampling
 
 import breeze.stats.distributions.Gaussian
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.RamDiskReplicaLruTracker
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.sql.functions.desc
+import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row}
 
 import scala.collection.mutable
 import scala.util.Random
-// import org.apache.commons.math3.analysis.function.Gaussian
-
-
 
 
 /** Transformer Parameters*/
-private[ml] trait GaussianSMOTEModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait GaussianSMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
 
 }
 
 /** Transformer */
 class GaussianSMOTEModel private[ml](override val uid: String) extends Model[GaussianSMOTEModel] with GaussianSMOTEModelParams {
-  def this() = this(Identifiable.randomUID("classBalancer"))
+  def this() = this(Identifiable.randomUID("gaussianSmote"))
 
   def getSingleDistance(x: Array[Double], y: Array[Double]): Double = {
     var distance = 0.0
@@ -43,10 +42,9 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
   }
 
   def getSmoteSample(row: Row): Row = {
-    val index = row(0).toString.toLong
-    val label = row(1).toString.toInt
-    val features = row(2).asInstanceOf[DenseVector].toArray
-    val neighbors = row(3).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail // skip the self neighbor
+    val label = row(0).toString.toDouble
+    val features = row(1).asInstanceOf[DenseVector].toArray
+    val neighbors = row(2).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail // skip the self neighbor
     val randomNeighbor = neighbors(Random.nextInt(neighbors.length)).toArray
 
     val randmPoint = Random.nextDouble()
@@ -55,62 +53,69 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     val sigma = 0.5 // FIXME - make it a parameter
     // FIXME - ask if this should be multi-dimensional?
     val ranges = features.indices.map(x => getGaussian(gap(x), sigma)).toArray
-    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, ranges).transpose.map(x => x(0) + (x(1) - x(0) * x(2)))).toDense
+    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, ranges).transpose.map(x => x(0) + (x(1) - x(0) * x(2)))).toDense // FIXME - check formula
 
-    Row(index, label, syntheticExample)
+    Row(label, syntheticExample)
   }
 
-  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame = {
+  def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
     val df = dataset.toDF
     val spark = df.sparkSession
     import spark.implicits._
 
-    val minorityDF = df.filter(df("label") === minorityClassLabel)
-    // val majorityDF = df.filter(df("label") =!= minorityClassLabel)
-
-    val m = 5   // k-value
-    val leafSize = 1000
+    val minorityDF = df.filter(df($(labelCol)) === minorityClassLabel)
 
     /*** For each minority example, calculate the m nn's in training set***/
-    //val minorityDF = df.filter(df("label")===minClassLabel)
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(10)   /// FIXME - check?
-      .setTopTreeLeafSize(leafSize)
-      .setSubTreeLeafSize(leafSize)
-      .setK(m + 1) // include self example
-      .setAuxCols(Array("label", "features"))
+       val model = new KNN().setFeaturesCol($(featuresCol))
+      .setTopTreeSize($(topTreeSize))
+      .setTopTreeLeafSize($(topTreeLeafSize))
+      .setSubTreeLeafSize($(subTreeLeafSize))
+      .setK($(k) + 1) // include self example
+      .setAuxCols(Array($(labelCol), $(featuresCol)))
+      .setBalanceThreshold($(balanceThreshold))
 
-    val f = model.fit(minorityDF)
-    val t = f.transform(minorityDF)
+    val fitModel = model.fit(minorityDF)
+    val minorityDataNeighbors = fitModel.transform(minorityDF)
 
-    t.show()
-    t.printSchema()
+    minorityDataNeighbors.show()
+    minorityDataNeighbors.printSchema()
 
     val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(minorityDF.count.toInt))
-    val collected = t.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
-    val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), df.schema).sort("index")
+    val collected = minorityDataNeighbors.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
+    val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), dataset.schema)
 
     createdSamples
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    val df = dataset.toDF()
-    // import df.sparkSession.implicits._
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
 
-    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
-    // val minClassLabel = counts.take(1)(0)(0).toString
-    // val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
+    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
-    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    println("dataset: " + dataset.count)
-    println("added: " + results.count)
+    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    results
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
@@ -124,9 +129,6 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
 
 }
 
-
-
-
 /** Estimator Parameters*/
 private[ml] trait GaussianSMOTEParams extends GaussianSMOTEModelParams with HasSeed {
 
@@ -137,7 +139,7 @@ private[ml] trait GaussianSMOTEParams extends GaussianSMOTEModelParams with HasS
 
 /** Estimator */
 class GaussianSMOTE(override val uid: String) extends Estimator[GaussianSMOTEModel] with GaussianSMOTEParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("gaussianSmote"))
 
   override def fit(dataset: Dataset[_]): GaussianSMOTEModel = {
     val model = new GaussianSMOTEModel(uid).setParent(this)
