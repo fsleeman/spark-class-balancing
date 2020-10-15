@@ -1,6 +1,7 @@
 package org.apache.spark.ml.sampling
 
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.KNNModel
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.linalg.VectorUDT
@@ -12,34 +13,45 @@ import org.apache.spark.sql.{DataFrame, Dataset}
 import org.apache.spark.sql.types.{ArrayType, DoubleType, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+
 import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.ml.knn.{KNN, KNNModel}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
 
 
 
 /** Transformer Parameters*/
-private[ml] trait RandomUndersampleModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait RandomUndersampleModelParams extends Params with HasFeaturesCol with HasLabelCol with ClassBalancingRatios {
 
 }
 
 /** Transformer */
 class RandomUndersampleModel private[ml](override val uid: String) extends Model[RandomUndersampleModel] with RandomUndersampleModelParams {
-  def this() = this(Identifiable.randomUID("classBalancer"))
+  def this() = this(Identifiable.randomUID("randomUndersample"))
+
+  private def getSamplesToKeep(label: Double, sampleCount: Long, minorityClassCount: Int, samplingRatios: Map[Double, Double]): Int ={
+    if(samplingRatios contains label) {
+      val ratio = samplingRatios(label)
+      if(ratio >= 1) {
+        sampleCount.toInt
+      } else {
+        (ratio * sampleCount).toInt
+      }
+    } else {
+      minorityClassCount
+    }
+  }
 
   def underSample(df: DataFrame, numSamples: Int): DataFrame = {
     val spark = df.sparkSession
-    var samples = Array[Row]() //FIXME - make this more parallel
 
     val underSampleRatio = numSamples / df.count().toDouble
     if (underSampleRatio < 1.0) {
-      val currentSamples = df.sample(withReplacement = false, underSampleRatio, seed = 42L).collect()
-      samples = samples ++ currentSamples
-      val foo = spark.sparkContext.parallelize(samples)
-      val x = spark.sqlContext.createDataFrame(foo, df.schema)
-      x
+      val currentSamples = df.sample(withReplacement = false, underSampleRatio).collect()
+      spark.sqlContext.createDataFrame(spark.sparkContext.parallelize(currentSamples), df.schema)
     }
     else {
       df
@@ -47,11 +59,33 @@ class RandomUndersampleModel private[ml](override val uid: String) extends Model
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    val counts = getCountsByClass(dataset.sparkSession, "label", dataset.toDF).sort("_2")
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val labels = counts.collect().map(x=>x(0).toString.toInt)
-    labels.filter(x=>x.toString!=minClassLabel).map(x=>dataset.filter(dataset("label")===x)).map(x=>underSample(x.toDF, minClassCount)).reduce(_ union _)
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
+
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
+    val minorityClassCount = counts.orderBy("_2").take(1)(0)(1).toString.toInt
+
+    val clsList: Array[Double] = counts.select("_1").collect().map(x=>x(0).toString.toDouble)
+
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+      .map(x=>underSample(x._2, getSamplesToKeep(x._1.toDouble, x._2.count, minorityClassCount, $(samplingRatios))))
+
+    val balanecedDF = clsDFs.reduce(_ union _)
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
+
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
@@ -65,9 +99,6 @@ class RandomUndersampleModel private[ml](override val uid: String) extends Model
 
 }
 
-
-
-
 /** Estimator Parameters*/
 private[ml] trait RandomUndersampleParams extends RandomUndersampleModelParams with HasSeed {
 
@@ -78,7 +109,7 @@ private[ml] trait RandomUndersampleParams extends RandomUndersampleModelParams w
 
 /** Estimator */
 class RandomUndersample(override val uid: String) extends Estimator[RandomUndersampleModel] with RandomUndersampleParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("randomUndersample"))
 
   override def fit(dataset: Dataset[_]): RandomUndersampleModel = {
     val model = new RandomUndersampleModel(uid).setParent(this)

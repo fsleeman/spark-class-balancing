@@ -12,6 +12,8 @@ import scala.collection.mutable
 
 object utils {
   type Element = (Long, (Int, Array[Float]))
+  type Element2 = (Long, (Double, Array[Float]))
+
   //type Element2 = ()
 
  def getCountsByClass(spark: SparkSession, label: String, df: DataFrame): DataFrame ={
@@ -26,8 +28,8 @@ object utils {
   }
 
   // FIXME - this is for cases with self neighbors
-  val getMatchingClassCount: UserDefinedFunction = udf((array: mutable.WrappedArray[Int], minorityClassLabel: Int) => {
-    def isMajorityNeighbor(x1: Int, x2: Int): Int = {
+  val getMatchingClassCount: UserDefinedFunction = udf((array: mutable.WrappedArray[Double], minorityClassLabel: Double) => {
+    def isMajorityNeighbor(x1: Double, x2: Double): Int = {
       if(x1 == x2) {
         1
       } else {

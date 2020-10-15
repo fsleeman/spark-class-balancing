@@ -7,7 +7,7 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.{getCountsByClass, getMatchingClassCount}
 import org.apache.spark.sql.functions.{desc, udf}
@@ -27,7 +27,43 @@ import org.apache.spark.sql.types.StructType
 
 /** Transformer Parameters*/
 private[ml] trait MWMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
+  /**
+    * Param for kNN k1-value.
+    * @group param
+    */
+  final val k1: Param[Int] = new Param[Int](this, "k1", "k1-value for kNN")
 
+  /** @group getParam */
+  final def setK1(value: Int): this.type = set(k1, value)
+
+  /**
+    * Param for kNN k2-value.
+    * @group param
+    */
+  final val k2: Param[Int] = new Param[Int](this, "k2", "k2-value for kNN")
+
+  /** @group getParam */
+  final def setK2(value: Int): this.type = set(k2, value)
+
+  /**
+    * Param for kNN k1-value.
+    * @group param
+    */
+  final val k3: Param[Int] = new Param[Int](this, "k3", "k3-value for kNN")
+
+  /** @group getParam */
+  final def setK3(value: Int): this.type = set(k3, value)
+
+  /**
+    * Param for kNN k-value.
+    * @group param
+    */
+  final val clusterK: Param[Int] = new Param[Int](this, "clusterK", "cluster k-value for kNN")
+
+  /** @group getParam */
+  final def setClusterK(value: Int): this.type = set(clusterK, value)
+
+  setDefault(k1->$(k), k2->$(k), k3->$(k), clusterK->10)
 }
 
 /** Transformer */
@@ -37,19 +73,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
   def explodeNeighbors(labels: mutable.WrappedArray[Double], features: mutable.WrappedArray[DenseVector]): Array[(Double, DenseVector)] = {
     val len = labels.length
     (1 until len).map(x=>(labels(x), features(x))).toArray
-    //(0 until len).map(x=>features(x)).toArray
   }
-  
-  def calculateDensityFactor(y: DenseVector, x: DenseVector): Double = {
-
-    0.0 // FIXME
-  }
-
-  def calculateInformationWeight(y: DenseVector, x: DenseVector) : Double = {
-
-    0.0 // FIXME
-  }
-
 
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
 
@@ -62,9 +86,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
 
     val Smin = df.filter(df($(labelCol)) === minorityClassLabel)
     val Smaj = df.filter(df($(labelCol)) =!= minorityClassLabel)
-
-    //val minorityClassCount = Smin.count
-    //val majorityClassCount = Smaj.count
 
     /*1) find k1 NNs of minority examples
       2) from minority examples, remove examples with no minority example neighbors
@@ -84,22 +105,18 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
         d) add example
     */
 
-
-
-    // val leafSize = 100
     /** 1 **/
-    val k1 = 5
     val model = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize($(topTreeSize))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
-      .setK(k1 + 1) // include self example
+      .setK($(k1) + 1) // include self example
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
     val f1: KNNModel = model.fit(df)
 
-    val SminNN = f1.transform(Smin)//.sort("index")
+    val SminNN = f1.transform(Smin)
     println("*** first knn ****")
     SminNN.show
 
@@ -111,12 +128,11 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     Sminf.show
 
     /** 3 **/
-    val k2 = 5
     val model2 = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize($(topTreeSize))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
-      .setK(k2) // include self example
+      .setK($(k2))
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
@@ -137,18 +153,15 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     println(Sbmaj.count())
 
     /** 5 **/
-    val k3 = 5
     val model3 = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize($(topTreeSize))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
-      .setK(k3) // include self example
+      .setK($(k3))
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
-    /*val f3: KNNModel = model.fit(majorityDF)
 
-    val Nmin = f3.transform(Sminf.drop("neighbors", "nnMinorityCount")).sort("index")*/
     println("minorityDF: " + Smin.count)
     val f3: KNNModel = model3.fit(Smin)
     val Nmin = f3.transform(Sbmaj.drop("neighbors", "nnMinorityCount"))//.sort("index")
@@ -158,15 +171,9 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val explodedNeighbors2 = Nmin.select("neighbors").withColumn($(labelCol), $"neighbors.label")
       .withColumn($(featuresCol), $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
-    /*println(explodedNeighbors.length)
-    for(x<-explodedNeighbors) {
-      println(x)
-    }*/
     // FIXME - correct Simin creation
     val Simin = spark.sparkContext.parallelize(explodedNeighbors2).toDF($(labelCol), $(featuresCol)).distinct()
-    println("~~ foo: ")
     Simin.show
-    //println(Sbmaj.count())
 
     /** 7 **/
 
@@ -174,48 +181,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     println("here")
     println(Sbmaj.count)
 
-
-    /*
-      1) yi for each Sbmaj
-      2) xi for each Simin
-      3) Calculate Iw(yi, xi)
-       a) Iw(yi, xi) = Cf(yi, xi) * Df(yi, xi)
-       b) dn(yi, xi) = dist(yi, xi)/ l, l = number of dimensions
-       c) Cf(yi, xi_) = Formula 6
-       d) Df(yi, xi) = Formula 8
-
-     */
-
-
-    /*
-    // ~~~~~~  By majority class
-    val SiminCollected: Array[DenseVector] = Simin.select("features").collect().map(x=>x(0).asInstanceOf[DenseVector])
-
-    val getClosenessFactors = udf((majorityExample: DenseVector) => {
-      // FIXME - these values are always set to CMAX, wrong values for CMAX and Cf_th?
-      def calculateClosenessFactor(y: DenseVector, x: DenseVector, l: Int): Double ={
-        val distance = pointDifference(y.toArray, x.toArray) / l.toDouble
-        val CMAX: Double = 3.0
-        val Cf_th: Double = 50.0 // FIXME- should this be on the order of the number of features?
-
-        val numerator = if(1/distance <= Cf_th) {
-          1/distance
-        } else {
-          Cf_th
-        }
-        (numerator / Cf_th) * CMAX
-      }
-
-      SiminCollected.map(SiminValue=>calculateClosenessFactor(majorityExample, SiminValue, majorityExample.size)).sorted
-    })
-
-
-    Sbmaj.show()
-    val closenessFactors = Sbmaj.withColumn("closeness", getClosenessFactors(Sbmaj("features"))) // result is majority data with minority closeness values
-    closenessFactors.show()
-    closenessFactors.printSchema()*/
-
-    // ~~~~ by minority class
     val SbmajCollected: Array[DenseVector] = Sbmaj.select($(featuresCol)).collect().map(x=>x(0).asInstanceOf[DenseVector])
 
     val getClosenessFactors = udf((minorityExample: DenseVector) => {
@@ -235,24 +200,21 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       SbmajCollected.map(SbmajValue=>calculateClosenessFactor(minorityExample, SbmajValue, 54)).sorted // FIXME - set feature length a member variable
     })
 
-    // Sbmaj.show()
     val closenessFactors = Simin.withColumn("closeness", getClosenessFactors(Simin($(featuresCol)))) // result is majority data with minority closeness values
     closenessFactors.show()
     closenessFactors.printSchema()
 
-    val calculateInformationWeights = udf((closenessFactors: mutable.WrappedArray[Double]) => { // , closenessFactors: Array[Double]
+    val calculateInformationWeights = udf((closenessFactors: mutable.WrappedArray[Double]) => {
       closenessFactors.toArray.map(x=>x*x/closenessFactors.toArray.sum)
     })
 
     val informationWeights = closenessFactors.withColumn("informationWeights", calculateInformationWeights(closenessFactors("closeness")))
     informationWeights.show
 
-    // informationWeights.select("informationWeights") // this should be the information weights for each maj example, then for each minority examples
-
 
     /* 8 */ // FIXME - wrong
 
-    val calculateSelectionWeights = udf((informationWeights: mutable.WrappedArray[Double]) => { // , closenessFactors: Array[Double]
+    val calculateSelectionWeights = udf((informationWeights: mutable.WrappedArray[Double]) => {
       informationWeights.toArray.sum
     })
     val selectionWeights = informationWeights.withColumn("selectionWeights", calculateSelectionWeights(informationWeights("informationWeights")))
@@ -263,29 +225,15 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     /* 9 */
     val selectionWeightSum = selectionWeights.select("selectionWeights").collect().map(x=>x(0).asInstanceOf[Double]).sum
 
-    val calculateSelectionProbabilities = udf((selectionWeight: Double) => { // , closenessFactors: Array[Double]
+    val calculateSelectionProbabilities = udf((selectionWeight: Double) => {
       selectionWeight / selectionWeightSum
     })
-    val selectionProbabilities = selectionWeights.withColumn("selectionProbabilities", calculateSelectionProbabilities(selectionWeights("selectionWeights")))//.sort(col("selectionProbabilities").desc)
+    val selectionProbabilities = selectionWeights.withColumn("selectionProbabilities", calculateSelectionProbabilities(selectionWeights("selectionWeights")))
     selectionProbabilities.show
 
-    // selection weights
-    // selection probs
-    // step 10
-    // step 11
-    // step 12
-
-    // not sure what these were for
-    /*val probs = selectionProbabilities.select("selectionProbabilities").collect.map(x=>x(0).asInstanceOf[Double])
-
-    var probSums: Array[Double] = Array[Double](probs.length)
-    for(i <- 1 until probs.length) {
-
-    }*/
-
     /* 10 */
-    val clusterKValue = 10 // FIXME - add parameter
-    val kmeans = new KMeans().setK(clusterKValue).setSeed(1L)
+    // val clusterKValue = 10 // FIXME - add parameter
+    val kmeans = new KMeans().setK($(clusterK))
     val kMeansModel = kmeans.fit(Smin)
     val SiminKMeansClusters = kMeansModel.transform(selectionProbabilities)
 
@@ -302,7 +250,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
 
     val partitionWindow = Window.partitionBy($"label").orderBy($"selectionProbabilities".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     val sumTest = sum($"selectionProbabilities").over(partitionWindow)
-    //val runningTotals = samplesToAddDF.select($"*", sumTest as "running_total")
     val runningTotals = SiminClustersCollected.select($"*", sumTest as "running_total")
 
     println("Running totals: ")
@@ -310,7 +257,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
 
     val runningTotalsCollected = runningTotals.collect()
 
-    val groupedClusters = (0 until clusterKValue).map(x=>runningTotalsCollected.filter(_(3)==x))
+    val groupedClusters = (0 until $(clusterK)).map(x=>runningTotalsCollected.filter(_(3)==x))
 
 
     val r = new scala.util.Random()
@@ -318,14 +265,14 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     def generateExample(): (Double, DenseVector) = {
 
       val randomIndexPoint = r.nextDouble()
-      val selectedRow = runningTotalsCollected.filter(x=>x(4).asInstanceOf[Double]>=randomIndexPoint)(0)// runningTotals.filter(runningTotals("running_total") >= randomIndexPoint).take(1)(0)
+      val selectedRow = runningTotalsCollected.filter(x=>x(4).asInstanceOf[Double]>=randomIndexPoint)(0)
 
       val label = selectedRow(0).asInstanceOf[Double]
       val features = selectedRow(1).asInstanceOf[DenseVector]
       val cluster = selectedRow(3).asInstanceOf[Int]
 
       val randomIndex = (groupedClusters(cluster).length * r.nextDouble()).toInt
-      val randomExample = groupedClusters(cluster)(randomIndex)(1).asInstanceOf[DenseVector]  // runningTotals.filter(runningTotals("prediction") === cluster).take(1)(0)(1).asInstanceOf[DenseVector]
+      val randomExample = groupedClusters(cluster)(randomIndex)(1).asInstanceOf[DenseVector]
 
       val alpha = r.nextDouble()
       val synthetic = Array(features.toArray, randomExample.toArray).transpose.map(x=> x(0) + alpha * (x(1) - x(0)))
@@ -333,19 +280,12 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       (label, Vectors.dense(synthetic).toDense)
     }
 
-    // val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample()) // FIXME - super slow, change method
     val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample())
     println("example count " + syntheticExamples.length)
 
-    /*val syntheticDF = spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
-      .withColumnRenamed("_1","index")
-      .withColumnRenamed("_2","label")
-      .withColumnRenamed("_3","features").sort("index")*/
-
     val syntheticDF = spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
-      .withColumnRenamed("_1","label")
-      .withColumnRenamed("_2","features")
-
+      .withColumnRenamed("_1",$(labelCol))
+      .withColumnRenamed("_2",$(featuresCol))
 
     df.show()
     syntheticDF.show
@@ -369,7 +309,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     datasetIndexed.show()
     datasetIndexed.printSchema()
 
-
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
 
@@ -378,43 +317,16 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    //val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
-
-
-
-    // FIXME - check formation
-    //val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
-    //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
-
-
-    val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+       val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
     val balancedDF: DataFrame = minorityClasses.map(x=>oversample(datasetSelected, x._1, majorityClassCount - x._2)).reduce(_ union _).union(datasetSelected.toDF()).select($(labelCol), $(featuresCol))
 
     balancedDF.show()
     balancedDF.printSchema()
-   // val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
       .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
-
-    /* val df = dataset.toDF()
-    // import df.sparkSession.implicits._
-
-    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
-    // val minClassLabel = counts.take(1)(0)(0).toString
-    // val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
-
-
-    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    val results: DataFrame = minorityClasses.map(x=>oversample(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
-
-    println("dataset: " + dataset.count)
-    println("added: " + results.count)
-
-    results */
   }
 
   override def transformSchema(schema: StructType): StructType = {

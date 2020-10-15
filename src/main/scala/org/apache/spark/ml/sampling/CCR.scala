@@ -1,10 +1,12 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.expressions.UserDefinedFunction
@@ -15,12 +17,8 @@ import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import scala.collection.mutable
 
 
-
-
-
-
 /** Transformer Parameters*/
-private[ml] trait CCRModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait CCRModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
 
 }
 
@@ -33,27 +31,24 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
 
   def getManhattanDistance(example: Array[Double], neighbor: Array[Double]): Double ={
-    Array(example, neighbor).transpose.map(x=>Math.abs(x(0)-x(1))).sum
+    Array(example, neighbor).transpose.map(x=>Math.abs(x(1)-x(0))).sum
   }
 
   val moveMajorityPoints2: UserDefinedFunction = udf((features: DenseVector, neighborIndices: mutable.WrappedArray[Long],
-                                                      neighborLabels: mutable.WrappedArray[Int], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
-
+                                                      neighborLabels: mutable.WrappedArray[Double], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
     val majorityIndicies: Array[Long] = neighborIndices.toArray
-    val majorityLabels: Array[Int] = neighborLabels.toArray
+    val majorityLabels: Array[Double] = neighborLabels.toArray
     val majorityNeighbors: Array[Array[Double]] = neighborFeatures.toArray.map(x=>x.toArray)
 
-    // val neighborDistances: Array[Double] = distanceArray.toArray
     val distances = distanceArray.toArray
 
     def pointDistance(features: Array[Double], neighbor: Array[Double]): Double ={
       Array(features, neighbor).transpose.map(x=>Math.abs(x(0) - x(1))).sum
     }
 
-    type MajorityPoint = (Long, Int, Array[Double])
+    // type MajorityPoint = (Long, Int, Array[Double])
 
-    def getMovedNeighbors(j: Int): (Boolean, (Long, Int, Array[Double])) ={
-      // println("^^^ " + distances(j) + " " + ri)
+    def getMovedNeighbors(j: Int): (Boolean, (Long, Double, Array[Double])) ={
       if(distances(j) <= ri) {
         val d = pointDistance(features.toArray, majorityNeighbors(j))
         // FIXME - check line 19 in algorithm for tj usage (ask about this)
@@ -66,54 +61,10 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       }
     }
 
-    // println("~~~ indicies: " + majorityNeighbors.indices.length)
-    val movedMajoirtyNeigbors = majorityNeighbors.indices.map(j=>getMovedNeighbors(j)).filter(x=>x._1).map(x=>x._2)
-    movedMajoirtyNeigbors
+    majorityNeighbors.indices.map(j=>getMovedNeighbors(j)).filter(x=>x._1).map(x=>x._2)
   })
 
-  /*val moveMajorityPoints: UserDefinedFunction = udf((features: DenseVector, neighborIndices: mutable.WrappedArray[Long],
-                                                     neighborLabels: mutable.WrappedArray[Int], neighborFeatures: mutable.WrappedArray[DenseVector], distanceArray: mutable.WrappedArray[Double], ri: Double) => {
-    val majorityIndicies: Array[Long] = neighborIndices.toArray
-    val majorityLabels: Array[Int] = neighborLabels.toArray
-    val majorityNeighbors: Array[Array[Double]] = neighborFeatures.toArray.map(x=>x.toArray)
-
-    // val neighborDistances: Array[Double] = distanceArray.toArray
-    val distances = distanceArray.toArray
-
-    def pointDistance(features: Array[Double], neighbor: Array[Double]): Double ={
-      Array(features, neighbor).transpose.map(x=>Math.abs(x(0) - x(1))).sum
-    }
-
-    type MajorityPoint = (Long, Int, Array[Double])
-
-    def getMovedNeighbors(j: Int): Array[(Long, Int, Array[Double])] ={
-      // println("^^^ " + distances(j) + " " + ri)
-      if(distances(j) <= ri) {
-        // println("@@", distances(j), ri)
-        val d = pointDistance(features.toArray, majorityNeighbors(j))
-        // FIXME - check line 19 in algorithm for tj usage
-        val scale =  (ri - d) / d
-        val offset: Array[Double] = Array(features.toArray, majorityNeighbors(j)).transpose.map(x=>x(0) - x(1)).map(x=>x * scale)
-        val updatedPosition = Array(offset, majorityNeighbors(j)).transpose.map(x=>x(0)+x(1))
-
-        Array[(Long, Int, Array[Double])]((majorityIndicies(j), majorityLabels(j), updatedPosition))
-      } else {
-        Array[(Long, Int, Array[Double])]()
-      }
-    }
-
-    println("~~~ indicies: " + majorityNeighbors.indices.length)
-    val movedMajoirtyNeigbors = majorityNeighbors.indices.map(j=>getMovedNeighbors(j))
-    val combinedMajoritNeighbors: Array[(Long, Int, Array[Double])] = movedMajoirtyNeigbors.reduce(_ union _)
-    print(combinedMajoritNeighbors(0))
-    print("***** " + combinedMajoritNeighbors.length)
-
-    combinedMajoritNeighbors
-    // return cleaning radius and moved majority points
-
-  })*/
-
-  def NoP(distances: Array[Double], radius: Double): Int = {
+  private def NoP(distances: Array[Double], radius: Double): Int = {
     def isWithinRadius(d: Double): Int ={
       if (d <= radius) {
         1
@@ -125,11 +76,11 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     distances.map(x=>isWithinRadius(x)).sum + 1
   }
 
-  def nearestNoWithinR(distances: Array[Double], r: Double): Double ={
+  private def nearestNoWithinR(distances: Array[Double], r: Double): Double ={
 
     def setWithinValue(d: Double, r: Double): Double ={
       if(d < r) {
-        // println("123456") // FIXME - check this is max value could happen (added fix)
+        // FIXME - check this is max value could happen (added fix)
         Double.MaxValue
       } else {
         d
@@ -138,7 +89,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     distances.map(x=>setWithinValue(x, r)).min
   }
 
-  val stuff: UserDefinedFunction = udf((distanceArray: mutable.WrappedArray[Double]) => {
+  private val stuff: UserDefinedFunction = udf((distanceArray: mutable.WrappedArray[Double]) => {
 
     val distances = distanceArray.toArray
     var energyBudget = 0.64
@@ -150,7 +101,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       val NoPValue = NoP(distances, ri)
       deltaR = energyBudget / NoPValue.toDouble
       if(NoP(distances, ri + deltaR) > NoPValue) {
-        // deltaR = nearestNoWithinR(distances, ri)
         deltaR = distances.filter(x=>x>ri).min
       }
       if(deltaR == Double.MaxValue) {
@@ -164,13 +114,11 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     ri
   })
 
-
-  def extractMovedPoints(index: Array[Long], label: Array[Int], feature: Array[Array[Double]]): Array[Row] ={
+  private def extractMovedPoints(index: Array[Long], label: Array[Double], feature: Array[Array[Double]]): Array[Row] ={
     index.indices.map(x=>Row(index(x), label(x), feature(x))).toArray
   }
 
-  def createSyntheicPoints(row: Row): Array[Row] ={
-    //println(row.toString())
+  private def createSyntheicPoints(row: Row): Array[Row] ={
     val label = row(0).toString
     val features = row(1).asInstanceOf[DenseVector].toArray
     val r = row(2).toString.toDouble
@@ -181,73 +129,74 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     (0 until examplesToAdd).map(_=>Row(0L, label, Vectors.dense(for(f <- features) yield f * (random.nextDouble() * 2.0 - 1) * r))).toArray
   }
 
+  private def getAveragedRow(rows: Array[Row]): Row ={
+    val data: Array[Double] = rows.map(x=>x(2).asInstanceOf[Array[Double]]).transpose.map(x=>x.sum).map(x=>x/rows.length.toDouble)
+    Row(rows(0)(0).toString.toLong, rows(0)(1).toString.toDouble, Vectors.dense(data))
+  }
 
-  //def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame ={
-  def oversampleClass(df: DataFrame, minorityClassLabel: String, samplesToAdd: Int): DataFrame ={
+  private def oversample(dataset: DataFrame, minorityClassLabel: Double, samplesToAdd: Int): DataFrame ={
     // parameters
-    // proportion = 1.0, energy = 1.0, scaling = 0.0
-    // val df = dataset.toDF
-    //val df = dataset.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
-    val spark = df.sparkSession
+    // proportion = 1.0, energy = 1.0, scaling = 0.0 // FIXME - add parameters
+    val spark = dataset.sparkSession
     import spark.implicits._
 
-    //val counts = getCountsByClass(spark, "label", df).sort("_2")
-    //val minClassLabel = counts.take(1)(0)(0).toString
-    //val minClassCount = counts.take(1)(0)(1).toString.toInt
-    //val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    //val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+    println("at dataset")
+    dataset.show
 
-    //val samplesToAdd = maxClassCount - minClassCount
     println("Samples to add: " + samplesToAdd)
+    println("dataset count: " + dataset.count)
+    println("minorityClassLabel: " + minorityClassLabel)
 
-    val minorityDF = df.filter(df("label") === minorityClassLabel)
-    val majorityDF = df.filter(df("label") =!= minorityClassLabel)
 
-    val leafSize = 100
-    val kValue = 10 /// FIXME - switch to distance?
 
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8)   /// FIXME - check?
-      .setTopTreeLeafSize(leafSize)
-      .setSubTreeLeafSize(leafSize)
-      .setK(kValue + 1) // include self example
-      .setAuxCols(Array("index", "label", "features"))
-      //.setQueryByDistance(false)
+    val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
+    val majorityDF = dataset.filter(dataset($(labelCol)) =!= minorityClassLabel)
+    println("minority count: " + minorityDF.count)
+    minorityDF.show
 
-    //println(model.getQueryMode)
 
-    val f: KNNModel = model.fit(majorityDF)
-    f.setDistanceCol("distances")
+    /// FIXME - switch to distance?
+    val model = new KNN().setFeaturesCol($(featuresCol))
+      .setTopTreeSize($(topTreeSize))
+      .setTopTreeLeafSize($(topTreeLeafSize))
+      .setSubTreeLeafSize($(subTreeLeafSize))
+      .setK($(k) + 1) // include self example
+      .setAuxCols(Array("index", $(labelCol), $(featuresCol)))
+      .setBalanceThreshold($(balanceThreshold))
 
-    val t = f.transform(minorityDF).sort("index")
+
+
+    println("majorityDF count: " + majorityDF.count)
+    val fitModel: KNNModel = model.fit(majorityDF)
+    fitModel.setDistanceCol("distances")
+
+    val minorityDataNeighbors = fitModel.transform(minorityDF)//.sort("index")
     println("*** first knn ****")
-    t.show
-    t.printSchema()
+    minorityDataNeighbors.show
+    minorityDataNeighbors.printSchema()
 
 
-    val test = t.withColumn("majorityIndex", $"neighbors.index")
+    val test = minorityDataNeighbors.withColumn("majorityIndex", $"neighbors.index")
       .withColumn("majorityLabel", $"neighbors.label")
       .withColumn("majorityPoints", $"neighbors.features").drop("neighbors")//.take(1)
     test.show
     test.printSchema()
 
     // FIXME - use full DF
-    val test2 = test.collect()// test.take(10)
+    val test2 = test.collect() // test.take(10)
 
-    val foo = test2.map(x=>x.toSeq).map(x=>(x.head.toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector],
+    val foo = test2.map(x=>x.toSeq).map(x=>(x(0).toString.toLong, x(1).toString, x(2).asInstanceOf[DenseVector],
       x(3).asInstanceOf[mutable.WrappedArray[Double]], x(4).asInstanceOf[mutable.WrappedArray[Long]],
-      x(5).asInstanceOf[mutable.WrappedArray[Int]], x(6).asInstanceOf[mutable.WrappedArray[DenseVector]]))
+      x(5).asInstanceOf[mutable.WrappedArray[Double]], x(6).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
     val testDF = bar.withColumnRenamed("_1", "index")
-      .withColumnRenamed("_2", "label")
-      .withColumnRenamed("_3", "features")
+      .withColumnRenamed("_2", $(labelCol))
+      .withColumnRenamed("_3", $(featuresCol))
       .withColumnRenamed("_4", "distances")
       .withColumnRenamed("_5", "majorityIndex")
       .withColumnRenamed("_6", "majorityLabel")
       .withColumnRenamed("_7", "majorityFeatures")
 
-
-    //println("****** at result")
     testDF.show
     testDF.printSchema()
 
@@ -276,13 +225,9 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     resulsWithSamplesToAdd.show
 
     // FIXME - should the sampling rate be proportional of gi?
-
     val createdPoints: Array[Array[Row]] = resulsWithSamplesToAdd.drop("index", "distances", "majorityIndex",
       "majorityLabel", "majorityFeatures", "riInverted", "gi").collect().map(x=>createSyntheicPoints(x))
-    println("***")
-    /*for(x<-createdPoints) {
-      println(x.length)
-    }*/
+
     println("created points length: " + createdPoints.length)
 
     val unionedPoints = createdPoints.reduce(_ union _).take(samplesToAdd)
@@ -304,8 +249,8 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     val movedPointsCollected = movedPointsSelected.collect()
 
-    val fooX: Array[(Array[Long], Array[Int], Array[Array[Double]])] = movedPointsCollected.map(x=>(x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray,
-      x(1).asInstanceOf[mutable.WrappedArray[Int]].toArray,
+    val fooX: Array[(Array[Long], Array[Double], Array[Array[Double]])] = movedPointsCollected.map(x=>(x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray,
+      x(1).asInstanceOf[mutable.WrappedArray[Double]].toArray,
       x(2).asInstanceOf[mutable.WrappedArray[mutable.WrappedArray[Double]]].toArray.map(y=>y.toArray)))
 
     val results = fooX.map(x=>extractMovedPoints(x._1, x._2, x._3))
@@ -315,51 +260,34 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     val grouped: Map[Long, Array[Row]] = total groupBy (s => s(0).toString.toLong)
 
-
-    def getAveragedRow(rows: Array[Row]): Row ={
-      val data: Array[Double] = rows.map(x=>x(2).asInstanceOf[Array[Double]]).transpose.map(x=>x.sum).map(x=>x/rows.length.toDouble)
-      Row(rows(0)(0).toString.toLong, rows(0)(1).toString.toInt, Vectors.dense(data))
-    }
-
     val averaged: Array[Row] = grouped.map(x=>getAveragedRow(x._2)).toArray
-
     val movedMajorityIndicies = averaged.map(x=>x(0).toString.toLong).toList
 
-
-    println("############")
-    println(averaged(0))
-    println(unionedPoints(0))
-
-
-    val movedMajorityExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(averaged.map(x=>(x(0).toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector])))).toDF() // x(2).asInstanceOf[Array[Double]])))).toDF()
+    val movedMajorityExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(averaged.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF() // x(2).asInstanceOf[Array[Double]])))).toDF()
       .withColumnRenamed("_1","index")
-      .withColumnRenamed("_2","label")
-      .withColumnRenamed("_3","features")
+      .withColumnRenamed("_2",$(labelCol))
+      .withColumnRenamed("_3",$(featuresCol))
 
-    movedMajorityExamplesDF.show
-    movedMajorityExamplesDF.printSchema()
-    println(movedMajorityExamplesDF.count())
+    //movedMajorityExamplesDF.show
+    //movedMajorityExamplesDF.printSchema()
+    //println(movedMajorityExamplesDF.count())
 
-
-    val syntheticExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(unionedPoints.map(x=>(x(0).toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector])))).toDF() // x(2).asInstanceOf[Array[Double]])))).toDF()
+    val syntheticExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(unionedPoints.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF() // x(2).asInstanceOf[Array[Double]])))).toDF()
       .withColumnRenamed("_1","index")
-      .withColumnRenamed("_2","label")
-      .withColumnRenamed("_3","features")
+      .withColumnRenamed("_2",$(labelCol))
+      .withColumnRenamed("_3",$(featuresCol))
 
-    syntheticExamplesDF.show
-    syntheticExamplesDF.printSchema()
-    println(syntheticExamplesDF.count)
+    //syntheticExamplesDF.show
+    //syntheticExamplesDF.printSchema()
+    //println(syntheticExamplesDF.count)
 
-
-
-    val keptMajorityDF = df.filter(!$"index".isin(movedMajorityIndicies: _*))
-    println(keptMajorityDF.count)
+    val keptMajorityDF = dataset.filter(!$"index".isin(movedMajorityIndicies: _*))
+    //println(keptMajorityDF.count)
     keptMajorityDF.show()
-    keptMajorityDF.printSchema()
-    println(keptMajorityDF.count())
+    //keptMajorityDF.printSchema()
+    //println(keptMajorityDF.count())
 
-
-    val finalDF = keptMajorityDF.union(movedMajorityExamplesDF).union(syntheticExamplesDF)
+    val finalDF = keptMajorityDF.union(movedMajorityExamplesDF).union(syntheticExamplesDF)//.drop("index")
 
     finalDF.show()
     println(finalDF.count())
@@ -367,35 +295,46 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     finalDF
   }
 
-
-
   override def transform(dataset: Dataset[_]): DataFrame = {
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
 
-    var df = dataset.toDF()
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
 
-    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
-    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select("index", $(labelCol), $(featuresCol))
+    datasetSelected.printSchema()
+
+    println("~~~~~~~~~~~~~~~~~~~")
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    //val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-   //  val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+    // val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
+    val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)//.sortBy(_._2)//.reverse
 
-    // val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+    //val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected))
+    //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)//.sortBy(_._2)//.reverse
-    for(x<-minorityClasses) {
-      println(x._1, x._2)
-    }
-
-    // FIXME - does the order matter?
+    var ds = datasetSelected
     for(minorityClass<-minorityClasses) {
-      df = oversampleClass(df, minorityClass._1, majorityClassCount - minorityClass._2)
+      ds = oversample(ds, minorityClass._1, majorityClassCount - minorityClass._2)
     }
 
-    println("dataset: " + dataset.count)
-    println("added: " + df.count)
 
-    df
+    //val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
+
+    // FIXME - test run did not generate new samples, adjust parameters
+    ds.drop("index").withColumn("originalLabel", restoreLabel(ds.col($(labelCol)))).drop($(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
@@ -408,8 +347,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
   }
 
 }
-
-
 
 
 /** Estimator Parameters*/

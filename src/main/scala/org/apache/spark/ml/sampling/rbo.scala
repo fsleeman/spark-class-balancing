@@ -1,12 +1,14 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.sql.functions.desc
+import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
@@ -17,13 +19,13 @@ import scala.util.Random
 
 
 /** Transformer Parameters*/
-private[ml] trait RBOModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait RBOModelParams extends Params with HasFeaturesCol with HasLabelCol with ClassBalancingRatios {
 
 }
 
 /** Transformer */
 class RBOModel private[ml](override val uid: String) extends Model[RBOModel] with RBOModelParams {
-  def this() = this(Identifiable.randomUID("classBalancer"))
+  def this() = this(Identifiable.randomUID("rbo"))
 
   def pointDifference(x1: Array[Double], x2: Array[Double]): Double = {
     val combined = Array[Array[Double]](x1, x2)
@@ -38,14 +40,13 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     //println(majorityValue.sum, minorityValue.sum)
 
     majorityValue.sum - minorityValue.sum
-    0.0
   }
 
-  def getRandomStopNumber(numInterations: Int, p: Double) : Int = {
+  def getRandomStopNumber(numIterations: Int, p: Double) : Int = {
     if (p == 1.0) {
-      numInterations
+      numIterations
     } else {
-      val iterationCount = numInterations * p + (Random.nextGaussian() * numInterations * p).toInt
+      val iterationCount = numIterations * p + (Random.nextGaussian() * numIterations * p).toInt
       if (iterationCount > 1) {
         iterationCount.toInt
       } else {
@@ -54,67 +55,100 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     }
   }
 
-  def createExample(majorityExamples: Array[Array[Double]], minorityExamples: Array[Array[Double]], gamma: Double, stepSize: Double, numInterations: Int, p: Double): DenseVector = {
+  def createExample(majorityExamples: Array[Array[Double]], minorityExamples: Array[Array[Double]], gamma: Double,
+                    stepSize: Double, numInterations: Int, p: Double): DenseVector = {
     //println("****** at create Example *****")
     //println("numIterations: " + numInterations)
     //println("stopIndex: " + getRandomStopNumber(numInterations, p))
 
     val featureLength = minorityExamples(0).length
     // println("feature length: " + featureLength)
-    val point = minorityExamples(Random.nextInt(minorityExamples.length))
+    var point = minorityExamples(Random.nextInt(minorityExamples.length))
 
     for(x<-0 until getRandomStopNumber(numInterations, p)) {
       println(x)
       val directions = Set(-1, 1)
-      val d: Array[Double] = (0 until featureLength).map(x=>directions.toVector(Random.nextInt(directions.size)).toDouble).toArray
-      val v: Array[Double] = (0 until featureLength).map(x=>Random.nextDouble()).toArray
+      val d: Array[Double] = (0 until featureLength).map(_=>directions.toVector(Random.nextInt(directions.size)).toDouble).toArray
+      val v: Array[Double] = (0 until featureLength).map(_=>Random.nextDouble()).toArray
 
       val translated: Array[Double] = Array(point, v, d).transpose.map(x=>x(0) + x(1) * x(2) * stepSize)
       if(calculatePhi(translated, majorityExamples, minorityExamples, gamma) < calculatePhi(point, majorityExamples, minorityExamples, gamma)) {
-        //point = translated
+        point = translated
       }
     }
     Vectors.dense(point).toDense
   }
 
-  override def transform(dataset: Dataset[_]): DataFrame = {
-    val df = dataset.toDF
-    val spark = df.sparkSession
-    val counts = getCountsByClass(spark, "label", df).sort("_2")
-    val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
-    val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+  def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
+    println("oversample samplesToAdd: " + samplesToAdd)
+    val spark = dataset.sparkSession
+    //val counts = getCountsByClass(spark, $(labelCol), dataset.toDF).sort("_2") // FIXME - allow for dataset
+    // val minClassLabel = counts.take(1)(0)(0).toString
+    // val minClassCount = counts.take(1)(0)(1).toString.toInt
+    // val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    // val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    println(minClassLabel, minClassCount)
-    println(maxClassLabel, maxClassCount)
+    // println(minClassLabel, minClassCount)
+    //println(maxClassLabel, maxClassCount)
 
-    val minorityDF = df.filter(df("label") === minClassLabel)
-    val majorityDF = df.filter(df("label") =!= minClassLabel)
+    val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
+    val majorityDF = dataset.filter(dataset($(labelCol)) =!= minorityClassLabel)
 
+    // FIXME - add parameters
     val gamma = 1
-    val numInterations = 1
-    val stepSize = 0.01
-    val p = 1.0
+    val numInterations = 1 // per synthetic example
+    val stepSize = 0.01 // optimization step size
+    val p = 1.0 // probability of stopping early
 
     println("majority " + majorityDF.count)
     majorityDF.show
     println("minority " + minorityDF.count)
     minorityDF.show
 
-    val minorityExamples = minorityDF.collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
-    val majorityExamples = majorityDF.collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
+    val minorityExamples = minorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)//collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
+    val majorityExamples = majorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)//collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
 
-    val addedPoints = (0 until maxClassCount-minClassCount).map(_=>createExample(majorityExamples, minorityExamples, gamma, stepSize, numInterations, p))
+    val addedPoints = (0 until samplesToAdd).map(_=>createExample(majorityExamples, minorityExamples, gamma, stepSize, numInterations, p))
 
-    val foo: Array[(Long, Int, DenseVector)] = addedPoints.map(x=>(0.toLong, minClassLabel.toInt, x)).toArray
+    println("length of points: " + addedPoints.length)
+
+    val foo: Array[(Double, DenseVector)] = addedPoints.map(x=>(minorityClassLabel, x)).toArray
     val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
-    val bar2 = bar.withColumnRenamed("_1", "index")
-      .withColumnRenamed("_2", "label")
+    val bar2 = bar.withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
-    val all = df.union(bar2)
+    bar2
+  }
 
-    all
+  override def transform(dataset: Dataset[_]): DataFrame = {
+
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
+
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
+
+    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
+
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
+      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(), majorityClassCount, $(samplingRatios))))
+
+    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
+
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
@@ -141,7 +175,7 @@ private[ml] trait RBOParams extends RBOModelParams with HasSeed {
 
 /** Estimator */
 class RBO(override val uid: String) extends Estimator[RBOModel] with RBOParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("rbo"))
 
   override def fit(dataset: Dataset[_]): RBOModel = {
     val model = new RBOModel(uid).setParent(this)

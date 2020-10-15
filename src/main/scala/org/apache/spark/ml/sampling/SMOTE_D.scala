@@ -1,10 +1,12 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
@@ -14,18 +16,19 @@ import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
+
 import scala.collection.mutable
 
 
 /** Transformer Parameters*/
-private[ml] trait SMOTEDModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait SMOTEDModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
 
 }
 
 
 /** Transformer */
 class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDModel] with SMOTEDModelParams {
-  def this() = this(Identifiable.randomUID("classBalancer"))
+  def this() = this(Identifiable.randomUID("smoteD"))
 
   val knnK = 5
 
@@ -45,18 +48,7 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
   private def sampleExistingExample(numberToAdd: Int, distances: scala.collection.mutable.WrappedArray[Double],
                             neighbors: scala.collection.mutable.WrappedArray[DenseVector]): Array[Array[Double]] ={
 
-    //println("************ in function")
-
-    //val distancesSum = distances.sum
-    //println("sum: " + distancesSum)
-    //println("to add: " + numberToAdd)
-
     val counts = distances.map(x=>((x/ distances.sum) * numberToAdd).toInt + 1).reverse
-
-
-    //for(x<-counts) {
-    //  println(x)
-   // }
 
     val originalExample = neighbors.head.toArray
     val reverseNeighbors = neighbors.tail.reverse.map(x=>x.toArray) // furtherest first
@@ -78,65 +70,22 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
   }
 
 
-  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame = {
-    val df = dataset.toDF //.filter((dataset("label") === 1) || (dataset("label") === 5)).toDF // FIXME
+  def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
+    val df = dataset.toDF
     val spark = df.sparkSession
 
-    val minorityDF = df.filter(df("label") === minorityClassLabel)
-    val minorityClassCount = minorityDF.count
-
-    val counts = getCountsByClass(spark, "label", df).sort("_2")
     import spark.implicits._
-    // val minClassLabel = counts.take(1)(0)(0).toString
-    val minClassCount = counts.take(1)(0)(1).toString.toInt
-    // val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
-    println("!!!!max count: " + maxClassCount)
 
-    val samplesToAdd = maxClassCount - minorityClassCount
-    println("Samples to add: " + samplesToAdd + " class: " + minorityClassLabel)
+    val model = new KNN().setFeaturesCol($(featuresCol))
+      .setTopTreeSize($(topTreeSize))
+      .setTopTreeLeafSize($(topTreeLeafSize))
+      .setSubTreeLeafSize($(subTreeLeafSize))
+      .setK($(k) + 1) // include self example
+      .setAuxCols(Array($(labelCol), $(featuresCol)))
+      .setBalanceThreshold($(balanceThreshold))
 
-
-
-    val leafSize = 10 // FIXME
-
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(minorityDF.count().toInt / 8) /// FIXME - check?
-      .setTopTreeLeafSize(leafSize)
-      .setSubTreeLeafSize(leafSize)
-      .setK(knnK + 1) // include self example
-      .setAuxCols(Array("label", "features"))
-
-    val f = model.fit(minorityDF)
-    val neighbors = f.transform(minorityDF).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
-    //neighbors.show()
-    //neighbors.printSchema()
-    // udf for distances
-
-    /*val sampleExistingExample =  udf((numberToAdd: Int, distances: scala.collection.mutable.WrappedArray[Double],
-                                      neighbors: scala.collection.mutable.WrappedArray[DenseVector]) => {
-
-      val counts = distances.map(x=>(((x + 0.5)/ distances.sum) * numberToAdd).toInt).reverse
-      val originalExample = neighbors.head.toArray
-      val reverseNeighbors = neighbors.tail.reverse.map(x=>x.toArray)
-
-      // FIXME - only samples upto the required count
-
-
-
-      def addOffset(x: Array[Double], distanceLine: Array[Double], offset: Double): Array[Double] = {
-        Array[Array[Double]](x, distanceLine).transpose.map(x=>x(0) + x(1)*offset)
-      }
-
-      def getNeighborSamples(index: Int)= {
-        val distanceLine: Array[Double] = Array[Array[Double]](originalExample, reverseNeighbors(index)).transpose.map(x=>x(1)-x(0))
-        (0 until counts(index)).map(x=>addOffset(originalExample, distanceLine, x/counts(index).toDouble))
-      }
-
-
-      val x: Seq[IndexedSeq[Array[Double]]] = reverseNeighbors.indices.map(x=>getNeighborSamples(x))
-      x.reduce(_ union _).toArray
-    })*/
+    val f = model.fit(dataset)
+    val neighbors = f.transform(dataset).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
 
     val distances = neighbors.withColumn("distances", calculateDistances(neighbors("neighborFeatures")))
     //distances.show
@@ -153,82 +102,61 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     localDistanceWeights.show
 
     val calculateSamplesToAdd = udf((std: Double, distances: scala.collection.mutable.WrappedArray[Double]) => {
-      //distances.indices.map(x=>(std * distances(x) * samplesToAdd))
-      //(std * minClassCount.toDouble).toInt
       (std * samplesToAdd).toInt + 1 // fix for too few values based on rounding
     })
 
     val samplesToAddDF = localDistanceWeights.withColumn("samplesToAdd", calculateSamplesToAdd(localDistanceWeights("stdWeights"), localDistanceWeights("localDistanceWeights")))
-    //samplesToAddDF.show
     println("samples to add: " + samplesToAdd)
 
-
-    // val calcSamplesToAdd = samplesToAddDF.select("samplesToAdd").collect.map(x=>x(0).toString.toDouble).sum
-
-    //val sortDF = samplesToAddDF.sort(col("samplesToAdd").desc)
     val sortDF = samplesToAddDF.sort(col("stdWeights").desc)
-    //sortDF.show
-    // println(calcSamplesToAdd)
 
-    //val partitionWindow = Window.partitionBy($"label").orderBy($"samplesToAdd".desc)
-
-
-    val partitionWindow = Window.partitionBy($"label").orderBy($"samplesToAdd".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    val partitionWindow = Window.partitionBy(col($(labelCol))).orderBy($"samplesToAdd".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     val sumTest = sum($"samplesToAdd").over(partitionWindow)
-    //val runningTotals = samplesToAddDF.select($"*", sumTest as "running_total")
     val runningTotals = sortDF.select($"*", sumTest as "running_total")
 
-    val w = Window.partitionBy($"label")
-      .orderBy($"samplesToAdd")
-      .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-
-    /*val filteredTotals2 = sortDF.withColumn("label", sum($"samplesToAdd").over(w))
-      .withColumn("val2_sum", sum($"samplesToAdd").over(w))
-    filteredTotals2.show*/
-
-    runningTotals.show(100)
-    println(runningTotals.count)
     val filteredTotals = runningTotals.filter(runningTotals("running_total") <= samplesToAdd) // FIXME - use take if less then amount
     println("samples to add: " + samplesToAdd)
     println("~~~~~" + filteredTotals.count)
+    filteredTotals.printSchema()
 
-    // val addedSamples: Array[Row] = filteredTotals.withColumn("added", sampleExistingExample(filteredTotals("samplesToAdd"), filteredTotals("distances"), filteredTotals("neighborFeatures"))).select("added").collect
-    val addedSamples: Array[Array[Array[Double]]] = filteredTotals.collect.map(x=>sampleExistingExample(x(8).asInstanceOf[Int], x(4).asInstanceOf[mutable.WrappedArray[Double]], x(3).asInstanceOf[mutable.WrappedArray[DenseVector]]))
+    val addedSamples: Array[Array[Array[Double]]] = filteredTotals.collect.map(x=>sampleExistingExample(x(7).asInstanceOf[Int], x(3).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     println("addedSamples: " + addedSamples.length)
-    val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(0.toLong, minorityClassLabel.toInt, x))
+    val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(minorityClassLabel, x))
 
-    println(collectedSamples.length)
+    // println(collectedSamples.length)
 
-    val foo: Array[(Long, Int, DenseVector)] = collectedSamples.map(x=>x.toSeq).map(x=>(x.head.toString.toLong, x(1).toString.toInt, x(2).asInstanceOf[DenseVector]))
-    val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
-    val bar2 = bar.withColumnRenamed("_1", "index")
-      .withColumnRenamed("_2", "label")
-      .withColumnRenamed("_3", "features")
-
-    //dataset.toDF.union(bar2)
-    bar2
-
+    spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(collectedSamples), dataset.schema)
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    val df = dataset.toDF()
-    // import df.sparkSession.implicits._
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
 
-    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
-    // val minClassLabel = counts.take(1)(0)(0).toString
-    // val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    println("!!!! max count: " + majorityClassCount)
-    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    //val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1=="5")
-    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
-    println("dataset: " + dataset.count)
-    println("added: " + results.count)
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    results
+    val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
+
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
@@ -253,7 +181,7 @@ private[ml] trait SMOTEDParams extends SMOTEDModelParams with HasSeed {
 
 /** Estimator */
 class SMOTED(override val uid: String) extends Estimator[SMOTEDModel] with SMOTEDParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("smoteD"))
 
   override def fit(dataset: Dataset[_]): SMOTEDModel = {
     val model = new SMOTEDModel(uid).setParent(this)

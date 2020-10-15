@@ -38,8 +38,8 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     Row(label, syntheticExample)
   }
 
-  def oversample(df: Dataset[_], samplesToAdd: Int): DataFrame = {
-    val spark = df.sparkSession
+  def oversample(dataset: Dataset[_], samplesToAdd: Int): DataFrame = {
+    val spark = dataset.sparkSession
     import spark.implicits._
 
     val model = new KNN().setFeaturesCol($(featuresCol))
@@ -50,14 +50,14 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
-    val knnModel: KNNModel = model.fit(df)
-    val nearestNeighborDF = knnModel.transform(df)
+    val knnModel: KNNModel = model.fit(dataset)
+    val nearestNeighborDF = knnModel.transform(dataset)
 
     val dfCount = nearestNeighborDF.count.toInt
     val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(dfCount))
     val collected = nearestNeighborDF.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
 
-    spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), df.schema)
+    spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), dataset.schema)
   }
 
   override def transform(dataset: Dataset[_]): DataFrame ={
@@ -89,9 +89,8 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    val restored = balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
       .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
-    restored
   }
 
   override def transformSchema(schema: StructType): StructType = {

@@ -136,10 +136,12 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     collected.map(x=>getInstanceAverageDistance(x, collected)).sum / collected.length.toDouble
   }
 
+  // FIXME - Fix hard coded code that fixes for small clusters
   def sampleCluster(df: DataFrame, samplesToAdd: Int): DataFrame ={
-    if(df.count > 1) {
+    if(df.count > 5) {
+      println("kMeans cluster df count: " + df.count)
       val r = new SMOTE
-      val model = r.fit(df).setBalanceThreshold(0.0) // FIXME - pass parameters
+      val model = r.fit(df).setBalanceThreshold(0.0).setTopTreeSize(df.count.toInt) // FIXME - pass parameters
       model.oversample(df, samplesToAdd)
     } else {
       df

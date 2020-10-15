@@ -1,10 +1,12 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
@@ -17,24 +19,20 @@ import scala.util.Random
 
 
 
-
-
-
-
 /** Transformer Parameters*/
-private[ml] trait ADASYNModelParams extends Params with HasFeaturesCol with HasInputCols {
+private[ml] trait ADASYNModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
 
 }
 
 /** Transformer */
 class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNModel] with ADASYNModelParams {
-  def this() = this(Identifiable.randomUID("classBalancer"))
+  def this() = this(Identifiable.randomUID("adasyn"))
 
-  def generateExamples(row: Row): Array[Array[Double]] = {
-    val label = row(1).toString.toInt
-    val examplesToCreate = row(5).asInstanceOf[Long].toInt
-    val neighborLabels = row(6).asInstanceOf[mutable.WrappedArray[Int]]
-    val neighborFeatures: mutable.Seq[DenseVector] = row(7).asInstanceOf[mutable.WrappedArray[DenseVector]]
+  def generateExamples(row: Row): Array[Row] = {
+    val label = row(0).toString.toDouble
+    val examplesToCreate = row(4).asInstanceOf[Long].toInt
+    val neighborLabels = row(5).asInstanceOf[mutable.WrappedArray[Double]]
+    val neighborFeatures: mutable.Seq[DenseVector] = row(6).asInstanceOf[mutable.WrappedArray[DenseVector]]
 
     if (neighborLabels.tail.contains(label)) {
       // skip self instance
@@ -46,124 +44,90 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
       }
 
       val randomIndicies = (0 until examplesToCreate).map(_ => minorityIndicies.toVector(Random.nextInt(minorityIndicies.length)))
-      (0 until examplesToCreate).map(x => neighborFeatures(randomIndicies(x)).toArray).toArray
+      (0 until examplesToCreate).map(x => Row(0L, label, neighborFeatures(randomIndicies(x)))).toArray
     } else {
-      val features: Array[Double] = neighborFeatures.head.toArray
-      (0 until examplesToCreate).map(x => features).toArray
+      val features: Array[Double] = neighborFeatures.head.toArray // FIXME - wut?
+      (0 until examplesToCreate).map(_ => Row(0L, label, Vectors.dense(features).toDense)).toArray
     }
   }
 
+  def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
+    val spark = dataset.sparkSession
+    import dataset.sparkSession.implicits._
 
-  def oversampleClass(dataset: Dataset[_], minorityClassLabel: String, samplesToAdd: Int): DataFrame = {
-    val df = dataset.toDF
-    import df.sparkSession.implicits._
-
-    val minorityDF = df.filter(df("label") === minorityClassLabel)
-    val majorityDF = df.filter(df("label") =!= minorityClassLabel)
-    val minorityClassCount = minorityDF.count
-    val majorityClassCount = majorityDF.count
-
-    val threshold = 1.0
-    val beta = 1.0 // final balance level, might need to adjust from the original paper
-
-    val imbalanceRatio = minorityClassLabel.toDouble / majorityClassCount.toDouble
-
-    //val G = (majorityClassCount - minorityClassCount) * beta
+    val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
     val G = samplesToAdd
 
-    val leafSize = 100
-    val kValue = 5
-    val model = new KNN().setFeaturesCol("features")
-      .setTopTreeSize(df.count().toInt / 8) /// FIXME - check?
-      .setTopTreeLeafSize(leafSize)
-      .setSubTreeLeafSize(leafSize)
-      .setK(kValue + 1) // include self example
-      .setAuxCols(Array("label", "features"))
+    val model = new KNN().setFeaturesCol($(featuresCol))
+      .setTopTreeSize($(topTreeSize))
+      .setTopTreeLeafSize($(topTreeLeafSize))
+      .setSubTreeLeafSize($(subTreeLeafSize))
+      .setK($(k) + 1) // include self example
+      .setAuxCols(Array($(labelCol), $(featuresCol)))
+      .setBalanceThreshold($(balanceThreshold))
 
-    val f: KNNModel = model.fit(df).setDistanceCol("distances")
-    val t = f.transform(minorityDF)
-    t.show
+    val fitModel: KNNModel = model.fit(dataset).setDistanceCol("distances")
+    val minorityDataNeighbors = fitModel.transform(minorityDF)
 
-    val getMajorityNeighborRatio = udf((array: mutable.WrappedArray[Int]) => {
-      def isMajorityNeighbor(x1: Int, x2: Int): Int = {
+    minorityDataNeighbors.show()
+
+    val getMajorityNeighborRatio = udf((array: mutable.WrappedArray[String]) => {
+      def isMajorityNeighbor(x1: String, x2: String): Int = {
         if (x1 == x2) {
           0
         } else {
           1
         }
       }
-      array.tail.map(x => isMajorityNeighbor(array.head, x)).sum / kValue.toDouble
+      array.tail.map(x => isMajorityNeighbor(array.head, x)).sum / $(k)
     })
 
-
-    val collected = t.select($"neighbors.label")
-    collected.show
-    collected.printSchema()
-
-    val dfNeighborRatio = t.withColumn("neighborClassRatio", getMajorityNeighborRatio($"neighbors.label")).drop("distances") //.drop("neighbors")
-    dfNeighborRatio.show
-
+    val dfNeighborRatio = minorityDataNeighbors.withColumn("neighborClassRatio", getMajorityNeighborRatio($"neighbors.label")).drop("distances")
     val neighborRatioSum = dfNeighborRatio.agg(sum("neighborClassRatio")).first.get(0).toString.toDouble
-    println(neighborRatioSum)
 
     val getSampleCount = udf((density: Double) => {
       Math.round(density / neighborRatioSum * G.toDouble)
     })
 
     val adjustedRatios = dfNeighborRatio.withColumn("samplesToAdd", getSampleCount($"neighborClassRatio")).withColumn("labels", $"neighbors.label").withColumn("neighborFeatures", $"neighbors.features")
-    adjustedRatios.show
-    adjustedRatios.printSchema()
+    adjustedRatios.show()
+    val syntheticExamples: Array[Array[Row]] = adjustedRatios.collect.map(x => generateExamples(x))
+    val totalExamples: Array[Row] = syntheticExamples.flatMap(x => x.toSeq)
 
-    val samplesToAddSum = adjustedRatios.agg(sum("samplesToAdd")).first.get(0).toString.toDouble
-    println("majority count: " + majorityClassCount)
-    println("minority count: " + minorityClassCount)
-    println("samples to add: " + samplesToAddSum) // FIXME - double check the size, wont be exactly the right number because of rounding
-
-    adjustedRatios.withColumn("labels", $"neighbors.label").withColumn("neighborFeatures", $"neighbors.features").show
-
-    val syntheticExamples: Array[Array[Array[Double]]] = adjustedRatios.collect.map(x => generateExamples(x))
-
-    println(syntheticExamples.length)
-    val totalExamples = syntheticExamples.flatMap(x => x.toSeq).map(x => (0, minorityClassLabel.toInt, Vectors.dense(x).toDense))
-
-
-    println("total: " + totalExamples.length)
-
-    val bar = df.sparkSession.createDataFrame(df.sparkSession.sparkContext.parallelize(totalExamples))
-    val bar2 = bar.withColumnRenamed("_1", "index")
-      .withColumnRenamed("_2", "label")
-      .withColumnRenamed("_3", "features")
-
-    // df.union(bar2)
-    bar2
-
+    spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(totalExamples), dataset.schema)
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    val df = dataset.toDF()
-    // import df.sparkSession.implicits._
+    val indexer = new StringIndexer()
+      .setInputCol($(labelCol))
+      .setOutputCol("labelIndexed")
 
-    val counts = getCountsByClass(df.sparkSession, "label", df).sort("_2")
-    // val minClassLabel = counts.take(1)(0)(0).toString
-    // val minClassCount = counts.take(1)(0)(1).toString.toInt
+    val datasetIndexed = indexer.fit(dataset).transform(dataset)
+      .withColumnRenamed($(labelCol), "originalLabel")
+      .withColumnRenamed("labelIndexed",  $(labelCol))
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+
+    val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
+    val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
+    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
-    val minorityClasses = counts.collect.map(x=>(x(0).toString, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    val results: DataFrame = minorityClasses.map(x=>oversampleClass(dataset, x._1, majorityClassCount - x._2)).reduce(_ union _).union(dataset.toDF())
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    println("dataset: " + dataset.count)
-    println("added: " + results.count)
+    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    results
-
-    // println(minClassLabel, minClassCount)
-    // println(maxClassLabel, maxClassCount)
-
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
-
-
 
   override def transformSchema(schema: StructType): StructType = {
     schema
@@ -186,7 +150,7 @@ private[ml] trait ADASYNParams extends ADASYNModelParams with HasSeed {
 
 /** Estimator */
 class ADASYN(override val uid: String) extends Estimator[ADASYNModel] with ADASYNParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("adasyn"))
 
   override def fit(dataset: Dataset[_]): ADASYNModel = {
     val model = new ADASYNModel(uid).setParent(this)
