@@ -6,7 +6,7 @@ import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
@@ -59,7 +59,8 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     val G = samplesToAdd
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      //.setTopTreeSize($(topTreeSize))
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example

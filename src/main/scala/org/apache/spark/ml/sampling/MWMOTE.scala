@@ -81,11 +81,17 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     import df.sparkSession.implicits._
     val spark = df.sparkSession
 
+    val featureLength = df.select("features").take(1)(0)(0).asInstanceOf[DenseVector].size
+    println("@@@@@@@@@ " + featureLength)
+
     println("oversample")
     dataset.printSchema()
 
     val Smin = df.filter(df($(labelCol)) === minorityClassLabel)
     val Smaj = df.filter(df($(labelCol)) =!= minorityClassLabel)
+
+    println("Smin: " + Smin.count())
+    println("Smaj: " + Smaj.count())
 
     /*1) find k1 NNs of minority examples
       2) from minority examples, remove examples with no minority example neighbors
@@ -125,6 +131,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     SminNN.printSchema()
 
     val Sminf = SminNN.withColumn("nnMinorityCount", getMatchingClassCount($"neighbors.label", col($(labelCol)))).filter("nnMinorityCount > 0") // .sort("index")
+    println("Sminf")
     Sminf.show
 
     /** 3 **/
@@ -187,8 +194,9 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       // FIXME - these values are always set to CMAX, wrong values for CMAX and Cf_th?
       def calculateClosenessFactor(x: DenseVector, y: DenseVector, l: Int): Double ={
         val distance = pointDifference(y.toArray, x.toArray) / l.toDouble
-        val CMAX: Double = 3.0
-        val Cf_th: Double = 50.0 // FIXME- should this be on the order of the number of features?
+        val CMAX: Double = 3.0 // FIXME - make a parameter
+        val Cf_th: Double = 50.0 // FIXME - make a parameter
+        // FIXME- should this be on the order of the number of features?
 
         val numerator = if(1/distance <= Cf_th) {
           1/distance
@@ -197,7 +205,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
         }
         (numerator / Cf_th) * CMAX
       }
-      SbmajCollected.map(SbmajValue=>calculateClosenessFactor(minorityExample, SbmajValue, 54)).sorted // FIXME - set feature length a member variable
+      SbmajCollected.map(SbmajValue=>calculateClosenessFactor(minorityExample, SbmajValue, featureLength)).sorted
     })
 
     val closenessFactors = Simin.withColumn("closeness", getClosenessFactors(Simin($(featuresCol)))) // result is majority data with minority closeness values
@@ -280,12 +288,23 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       (label, Vectors.dense(synthetic).toDense)
     }
 
-    val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample())
-    println("example count " + syntheticExamples.length)
+    println("Running total collected: " + runningTotalsCollected.length)
+    // Perform random oversampling if the class does not have appropriate examples for the standard method
+    val syntheticDF = if(runningTotalsCollected.length > 0) {
+      val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample())
 
-    val syntheticDF = spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
-      .withColumnRenamed("_1",$(labelCol))
-      .withColumnRenamed("_2",$(featuresCol))
+      spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
+        .withColumnRenamed("_1",$(labelCol))
+        .withColumnRenamed("_2",$(featuresCol))
+    } else {
+      val r = new RandomOversample()
+      val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
+      model.transform(Smin).toDF()
+    }
+
+    println("example count " + syntheticDF.count())
+
+
 
     df.show()
     syntheticDF.show
@@ -317,7 +336,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-       val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+     val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
     val balancedDF: DataFrame = minorityClasses.map(x=>oversample(datasetSelected, x._1, majorityClassCount - x._2)).reduce(_ union _).union(datasetSelected.toDF()).select($(labelCol), $(featuresCol))
 
     balancedDF.show()

@@ -43,7 +43,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val distances = distanceArray.toArray
 
     def pointDistance(features: Array[Double], neighbor: Array[Double]): Double ={
-      Array(features, neighbor).transpose.map(x=>Math.abs(x(0) - x(1))).sum
+      Array(features, neighbor).transpose.map(x=>Math.abs(x(1) - x(0))).sum
     }
 
     // type MajorityPoint = (Long, Int, Array[Double])
@@ -52,7 +52,13 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       if(distances(j) <= ri) {
         val d = pointDistance(features.toArray, majorityNeighbors(j))
         // FIXME - check line 19 in algorithm for tj usage (ask about this)
-        val scale =  (ri - d) / d
+        // FIXME - devide by zero val scale = (ri - d) / d
+        val scale = if(d == 0) {
+          ri
+        } else {
+          (ri - d) / d
+        }
+        // println(scale)
         val offset: Array[Double] = Array(features.toArray, majorityNeighbors(j)).transpose.map(x=>x(1) - x(0)).map(x=>x * scale)
         val updatedPosition = Array(offset, majorityNeighbors(j)).transpose.map(x=>x(0)+x(1))
         (true, (majorityIndicies(j), majorityLabels(j), updatedPosition))
@@ -147,8 +153,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     println("dataset count: " + dataset.count)
     println("minorityClassLabel: " + minorityClassLabel)
 
-
-
     val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
     val majorityDF = dataset.filter(dataset($(labelCol)) =!= minorityClassLabel)
     println("minority count: " + minorityDF.count)
@@ -167,6 +171,8 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
 
     println("majorityDF count: " + majorityDF.count)
+
+
     val fitModel: KNNModel = model.fit(majorityDF)
     fitModel.setDistanceCol("distances")
 
@@ -200,7 +206,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     testDF.show
     testDF.printSchema()
 
-
     val result = testDF.withColumn("ri", stuff($"distances"))
     result.show
 
@@ -224,19 +229,25 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val resulsWithSamplesToAdd = resultWithSampleCount.withColumn("samplesToAdd", ($"gi"/ giSum) * samplesToAdd).sort(col("samplesToAdd").desc)
     resulsWithSamplesToAdd.show
 
+    // XXXXX
     // FIXME - should the sampling rate be proportional of gi?
     val createdPoints: Array[Array[Row]] = resulsWithSamplesToAdd.drop("index", "distances", "majorityIndex",
       "majorityLabel", "majorityFeatures", "riInverted", "gi").collect().map(x=>createSyntheicPoints(x))
 
     println("created points length: " + createdPoints.length)
 
+
     val unionedPoints = createdPoints.reduce(_ union _).take(samplesToAdd)
+
     println("~~~~~~ oversampled points: " + unionedPoints.length)
 
     val movedPoints = resultWithSampleCount.withColumn("movedMajorityPoints",
       moveMajorityPoints2($"features",  $"majorityIndex",  $"majorityLabel", $"majorityFeatures", $"distances", $"ri"))
     movedPoints.show()
     movedPoints.printSchema()
+    println("moved points: " + movedPoints.count())
+
+    // XXXXXX
 
     val movedPointsExpanded = movedPoints.withColumn("movedMajorityIndex", $"movedMajorityPoints._1")
       .withColumn("movedMajorityLabel", $"movedMajorityPoints._2")
@@ -246,6 +257,9 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     val movedPointsSelected = movedPointsExpanded.select("movedMajorityIndex", "movedMajorityLabel", "movedMajorityExamples")
     movedPointsSelected.show()
+
+
+
 
     val movedPointsCollected = movedPointsSelected.collect()
 
@@ -324,9 +338,14 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
     var ds = datasetSelected
+
+
+
+
     for(minorityClass<-minorityClasses) {
       ds = oversample(ds, minorityClass._1, majorityClassCount - minorityClass._2)
     }
+
 
 
     //val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))

@@ -103,11 +103,22 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
 
     neighborClassFiltered.show
 
-    val dataForSmote = neighborClassFiltered.select($(labelCol), $(featuresCol), "neighbors")
+    // Check is filtered data is empty
+    val dataForSmote1 = if(neighborClassFiltered.count() > 0) {
+      neighborClassFiltered
+    } else {
+      neighborCounts
+    } //withColumn("neighborFeatures", $"neighbors.features").select($(labelCol), $(featuresCol), "neighborFeatures")
+
+    val dataForSmote = dataForSmote1.withColumn("neighborFeatures", $"neighbors.features").select($(labelCol), $(featuresCol), "neighborFeatures")
+    println("~~ at dataForSmote")
     dataForSmote.show
     dataForSmote.printSchema()
-    val dataForSmoteCollected = dataForSmote.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
+    val dataForSmoteCollected = dataForSmote.collect()//dataForSmote.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
+    //dataForSmote.withColumn("neighborFeatures", $"neighbors.features").show()
+    //dataForSmote.withColumn("neighborFeatures", $"neighbors.features").printSchema()
 
+    println("dataForSmoteCollected: " + dataForSmoteCollected.length)
     val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(dataForSmoteCollected.length))
     val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(dataForSmoteCollected(x)))), dataset.schema)
 

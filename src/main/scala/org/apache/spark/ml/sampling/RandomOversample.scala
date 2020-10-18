@@ -5,7 +5,7 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.KNNModel
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.linalg.VectorUDT
-import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
 import org.apache.spark.ml.util.{Identifiable, SchemaUtils}
 import org.apache.spark.rdd.RDD
@@ -22,10 +22,14 @@ import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
 
 
-
 /** Transformer Parameters*/
 private[ml] trait RandomOversampleModelParams extends Params with HasFeaturesCol with HasLabelCol with ClassBalancingRatios {
+  final val singleClassOversamplingSize: Param[Int] = new Param[Int](this, "singleClassOversampling", "samples to add for single class case")
 
+  setDefault(singleClassOversamplingSize, 0)
+
+  /** @group getParam */
+  final def setSingleClassOversampling(value: Int): this.type = set(singleClassOversamplingSize, value)
 }
 
 /** Transformer */
@@ -44,8 +48,7 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
       samples = samples ++ currentSamples
     }
 
-    val foo = spark.sparkContext.parallelize(samples)
-    spark.sqlContext.createDataFrame(foo, df.schema)
+    spark.sqlContext.createDataFrame(spark.sparkContext.parallelize(samples), df.schema)
   }
 
   // FIXME
@@ -64,6 +67,7 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
 
 
   override def transform(dataset: Dataset[_]): DataFrame = {
+    // FIXME - skip indexer for single class?
     val indexer = new StringIndexer()
       .setInputCol($(labelCol))
       .setOutputCol("labelIndexed")
@@ -82,12 +86,17 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
+    val balanecedDF = if(counts.count() > 1) {
+      val clsList = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
-    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
-      .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
+      val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+        .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+       datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    } else {
+      oversample(datasetIndexed, $(singleClassOversamplingSize))
+    }
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))

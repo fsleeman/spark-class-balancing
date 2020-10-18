@@ -6,7 +6,7 @@ import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
@@ -77,7 +77,8 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     import spark.implicits._
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      // .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example

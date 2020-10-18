@@ -390,7 +390,6 @@ object Sampling {
     scaledData.show()
     scaledData.printSchema()
 
-
     splits :+= 0
 
     if(numSplits < 2) {
@@ -431,7 +430,7 @@ object Sampling {
           "IRES" -> 40.0*/
         )
 
-
+    // FIXME - make per class map parallel to run faster
 
      var resultArray = Array[Array[String]]()
      for(samplingMethod <- samplingMethods) {
@@ -439,7 +438,7 @@ object Sampling {
        val t0 = System.nanoTime()
        val sampledData = if(samplingMethod == "kMeansSmote") {
          val r = new KMeansSMOTE()
-         val model = r.fit(trainData)//.setBalanceThreshold(0.0)//.setTopTreeSize(2)
+         val model = r.fit(trainData).setBalanceThreshold(0.0)//.setTopTreeSize(2)
          model.transform(trainData)
        }  else if(samplingMethod == "borderlineSmote") {
          val r = new BorderlineSMOTE()
@@ -467,7 +466,7 @@ object Sampling {
          model.transform(trainData)
        } else if(samplingMethod == "ccr") {
          val r = new CCR()
-         val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(10)
+         val model = r.fit(trainData).setBalanceThreshold(0.0)// .setTopTreeSize(10)
          model.transform(trainData)
        } else if(samplingMethod == "ans") {
          val r = new ANS()

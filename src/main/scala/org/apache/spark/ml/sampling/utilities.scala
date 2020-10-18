@@ -1,7 +1,8 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.Vectors
-import org.apache.spark.ml.param.{Param, Params}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.{count, udf}
 import org.apache.spark.sql.types._
@@ -109,6 +110,14 @@ object utilities {
     setDefault(k -> 5, topTreeSize -> 10, topTreeLeafSize -> 100, subTreeLeafSize -> 100, balanceThreshold -> 0.7)
   }
 
+  def calculateToTreeSize(topTreeSize: Int, datasetCount: Long): Int ={
+    if(topTreeSize >= datasetCount.toInt) {
+      datasetCount.toInt
+    } else {
+      topTreeSize
+    }
+  }
+
   def getSamplesToAdd(label: Double, sampleCount: Long, majorityClassCount: Int, samplingRatios: Map[Double, Double]): Int ={
     println("samplesToAdd " + sampleCount + " " + majorityClassCount)
     println(samplingRatios)
@@ -124,7 +133,6 @@ object utilities {
       majorityClassCount - sampleCount.toInt
     }
   }
-
 
   def getCountsByClass(label: String, df: DataFrame): DataFrame = {
     val numberOfClasses = df.select("label").distinct().count()

@@ -8,7 +8,7 @@ import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
@@ -67,7 +67,8 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
 
     /*** For each minority example, calculate the m nn's in training set***/
        val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      //.setTopTreeSize($(topTreeSize))
+       .setTopTreeSize(calculateToTreeSize($(topTreeSize), minorityDF.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example

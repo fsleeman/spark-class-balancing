@@ -7,7 +7,7 @@ import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
@@ -42,9 +42,9 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
   def createSample(clusterId: Int): DenseVector ={
     val row = knnClusters(clusterId)(Random.nextInt(knnClusterCounts(clusterId)))
     val features = row(1).asInstanceOf[mutable.WrappedArray[DenseVector]]
-
+    println("feature length: " + features.length)
     val aSample = features(0).toArray
-    val bSample = features(Random.nextInt($(k) + 1)).toArray // FIXME - check
+    val bSample = features(Random.nextInt(Math.min($(k) + 1, features.length))).toArray // FIXME - check
     val offset = Random.nextDouble()
 
     /// FIXME - check ALL distance calculations
@@ -55,8 +55,10 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     df.show()
     import spark.implicits._
 
+    // FIXME - why twice?
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      //.setTopTreeSize($(topTreeSize))
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), df.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -65,7 +67,8 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
 
     if(model.getBufferSize < 0.0) {
       val model = new KNN().setFeaturesCol($(featuresCol))
-        .setTopTreeSize($(topTreeSize))
+        //.setTopTreeSize($(topTreeSize))
+        .setTopTreeSize(calculateToTreeSize($(topTreeSize), df.count()))
         .setTopTreeLeafSize($(topTreeLeafSize))
         .setSubTreeLeafSize($(subTreeLeafSize))
         .setK($(k) + 1) // include self example
@@ -88,6 +91,11 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val predictions = model.transform(minorityDF)
 
     val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x)).filter(x=>x.count()>0).toArray
+
+    println("cluster sizes")
+    for(x<-clusters) {
+      println("size " + x.count())
+    }
 
     // knn for each cluster
     knnClusters =  clusters.map(x=>calculateKnnByCluster(spark, x).select($(labelCol), "neighborFeatures").collect)
