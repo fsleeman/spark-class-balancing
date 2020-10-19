@@ -1,9 +1,13 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.spark.ml.Model
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.ml.param.shared.HasFeaturesCol
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN}
+import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.functions.{count, udf}
 import org.apache.spark.sql.types._
 
@@ -110,6 +114,7 @@ object utilities {
     setDefault(k -> 5, topTreeSize -> 10, topTreeLeafSize -> 100, subTreeLeafSize -> 100, balanceThreshold -> 0.7)
   }
 
+
   def calculateToTreeSize(topTreeSize: Int, datasetCount: Long): Int ={
     if(topTreeSize >= datasetCount.toInt) {
       datasetCount.toInt
@@ -125,11 +130,14 @@ object utilities {
     if(samplingRatios contains label) {
       val ratio = samplingRatios(label)
       if(ratio <= 1) {
+        println("sample count 0")
         0
       } else {
+        println("sample count " + ((ratio - 1.0) * sampleCount).toInt)
         ((ratio - 1.0) * sampleCount).toInt
       }
     } else {
+      println("sample count " + (majorityClassCount - sampleCount.toInt))
       majorityClassCount - sampleCount.toInt
     }
   }

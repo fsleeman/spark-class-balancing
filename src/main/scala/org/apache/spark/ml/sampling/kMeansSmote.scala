@@ -51,7 +51,7 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
   def this() = this(Identifiable.randomUID("kmeanssmote"))
 
   private def getFeaturePoint(ax: Double, bx: Double) : Double ={
-    Random.nextDouble() * (maxValue(ax, bx) - minValue(ax, bx)) + minValue(ax, bx)
+    Random.nextDouble() * (Math.max(ax, bx) - Math.min(ax, bx)) + Math.min(ax, bx)
   }
 
   private def getSmotePoint(a: Array[Double], b: Array[Double]): Array[Double] = {

@@ -12,7 +12,7 @@ import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.ml.knn.{KNN, KNNModel}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities._
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
 
@@ -32,8 +32,8 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val neighbors = row(2).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail
     val randomNeighbor: Array[Double] = neighbors(Random.nextInt(neighbors.length)).toArray
 
-    val gap = randomNeighbor.indices.map(_=>Random.nextDouble()).toArray // FIXME - should this be one value instead?
-    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, gap).transpose.map(x=>x(0) + x(2) * (x(1)-x(0)))).toDense
+    val gap = Random.nextDouble()
+    val syntheticExample = Vectors.dense(Array(features, randomNeighbor).transpose.map(x=>x(0) + gap * (x(1) - x(0)))).toDense
 
     Row(label, syntheticExample)
   }
@@ -43,7 +43,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     import spark.implicits._
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -72,16 +72,16 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     datasetIndexed.show()
     datasetIndexed.printSchema()
 
-    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+        val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
 
     val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
     val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
 
-    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
+    val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val clsList: Array[String] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString)
+    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
       .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))

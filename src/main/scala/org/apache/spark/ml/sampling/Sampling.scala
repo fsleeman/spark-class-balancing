@@ -9,20 +9,11 @@ import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
-import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.ml.linalg.SparseVector
-
 import scala.io.Source
-import scala.util.Random
-import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorIndexer}
-
-import scala.collection.mutable.ArrayBuffer
-
-import org.apache.spark.mllib.classification.LogisticRegressionWithLBFGS
+import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.mllib.evaluation.MulticlassMetrics
-import org.apache.spark.mllib.regression.LabeledPoint
-import org.apache.spark.mllib.util.MLUtils
-
+import org.apache.spark.ml.sampling.utilities.{convertFeaturesToVector, getCountsByClass}
 //FIXME - turn classes back to Ints instead of Doubles
 object Sampling {
 
@@ -36,14 +27,14 @@ object Sampling {
   type Element = (Long, (Int, Array[Float]))
   type DistanceResult = (Float, Int)
 
-  def maxValue(a: Double, b:Double): Double ={
+  /*def maxValue(a: Double, b:Double): Double ={
     if(a >= b) { a }
     else { b }
   }
   def minValue(a: Double, b:Double): Double ={
     if(a <= b) { a }
     else { b }
-  }
+  }*/
 
   def printArray(a: Array[Double]) ={
     for(x<-a) {
@@ -60,16 +51,17 @@ object Sampling {
       println(x)
     }
     distinctClasses.printSchema()
+    distinctClasses.show(100)
 
     //FIXME - don't calculate twice
-
-    val classLabels = distinctClasses.collect().map(x => x.toSeq.last.toString.toDouble)
+    // val classLabels = distinctClasses.collect().map(x => x.toSeq.last.toString.toDouble)
 
     //val maxLabel: Double = classLabels.max
     //val minLabel: Double = classLabels.min
-    val numberOfClasses = classLabels.length
+    val numberOfClasses = labels.length.toDouble
     //val classCount = confusionMatrix.columns.length - 1
     //val testLabels = distinctClasses.map(_.getAs[String]("label")).map(x => x.toDouble).collect().sorted
+    println("labels: " + labels.length + " numberOfClasses: " + numberOfClasses)
 
     val rows: Array[Array[Double]] = confusionMatrix.collect.map(_.toSeq.toArray.map(_.toString.toDouble))
 
@@ -138,6 +130,7 @@ object Sampling {
       val colSum = updatedRows.map(x => x.tail(clsIndex)).sum
       // val rowValueSum = if (classMaps.map(x => x._2).contains(clsIndex)) updatedRows.filter(x => x.head == clsIndex)(0).tail.map(x => x).sum else 0
       val rowValueSum = updatedRows(clsIndex).tail.sum
+      println("col sum: " + colSum + " row sum: " + rowValueSum )
       //println("clsIndex: " + clsIndex + " colSum: " + colSum + " rowSum: " + rowValueSum)
       // val tp: Double = if (classMaps.map(x => x._2).contains(clsIndex)) updatedRows.filter(x => x.head == clsIndex)(0).tail(clsIndex) else 0
       val tp: Double = updatedRows(clsIndex).tail(clsIndex)
@@ -149,6 +142,8 @@ object Sampling {
 
       val recall = tp / (tp + fn)
       val precision = tp / (tp + fp)
+
+
 
       AvAvg += ((tp + tn) / (tp + tn + fp + fn))
       MAvG *= recall
@@ -165,7 +160,7 @@ object Sampling {
       AvFb += getAvFb
 
       //FIXME - what to do if col/row sum are zero?
-      val rowColMaxValue = maxValue(colSum, rowValueSum)
+      val rowColMaxValue = Math.max(colSum, rowValueSum)
       if(rowColMaxValue > 0) {
         CBA += tp / rowColMaxValue
       }
@@ -193,94 +188,6 @@ object Sampling {
     Array(AvAvg.toString, MAvG.toString, RecM.toString, PrecM.toString, Recu.toString, Precu.toString, FbM.toString, Fbu.toString, AvFb.toString, CBA.toString)
   }
 
-  //assume there is only one class present
-  def overSample(spark: SparkSession, df: DataFrame, numSamples: Int): DataFrame = {
-    var samples = Array[Row]() //FIXME - make this more parallel
-    //FIXME - some could be zero if split is too small
-    //val samplesToAdd = numSamples - df.count()
-    val currentCount = df.count()
-    if (0 < currentCount && currentCount < numSamples) {
-      val currentSamples = df.sample(withReplacement = true, (numSamples - currentCount) / currentCount.toDouble).collect()
-      samples = samples ++ currentSamples
-    }
-
-    val foo = spark.sparkContext.parallelize(samples)
-    val x = spark.sqlContext.createDataFrame(foo, df.schema)
-    df.union(x).toDF()
-  }
-
-  def underSample(spark: SparkSession, df: DataFrame, numSamples: Int): DataFrame = {
-    var samples = Array[Row]() //FIXME - make this more parallel
-
-    val underSampleRatio = numSamples / df.count().toDouble
-    if (underSampleRatio < 1.0) {
-      val currentSamples = df.sample(withReplacement = false, underSampleRatio, seed = 42L).collect()
-      samples = samples ++ currentSamples
-      val foo = spark.sparkContext.parallelize(samples)
-      val x = spark.sqlContext.createDataFrame(foo, df.schema)
-      x
-    }
-    else {
-      df
-    }
-  }
-
-  def smoteSample(randomInts: Random, currentClassZipped: Array[(Row, Int)], cls: Int): Row = {
-    def r = randomInts.nextInt(currentClassZipped.length)
-
-    val rand = Array(r, r, r, r, r)
-    val sampled: Array[Row] = currentClassZipped.filter(x => rand.contains(x._2)).map(x => x._1) //FIXME - issues not taking duplicates
-    //FIXME - can we dump the index column?
-    val values: Array[Array[Double]] = sampled.map(x=>x(2).asInstanceOf[DenseVector].toArray)
-
-    val ddd: Array[Double] = values.transpose.map(_.sum /values.length)
-
-    val r2 = Row(0.toLong, cls, Vectors.dense(ddd))
-    r2
-    }
-
-  def smote(spark: SparkSession, df: DataFrame, numSamples: Int): DataFrame = {
-    val aggregatedCounts = df.groupBy("label").agg(count("label"))
-    val randomInts: Random = new scala.util.Random(42L)
-    // FIXME - make this more parallel
-    val currentCount = df.count()
-    val cls = aggregatedCounts.take(1)(0)(0).toString.toInt //FIXME
-
-    val finaDF = if (currentCount < numSamples) {
-      val samplesToAdd = numSamples - currentCount
-      val currentClassZipped = df.collect().zipWithIndex
-      val mappedResults = spark.sparkContext.parallelize(1 to samplesToAdd.toInt).map(x => smoteSample(randomInts, currentClassZipped, cls))
-      val mappedDF = spark.sqlContext.createDataFrame(mappedResults, df.schema)
-      val joinedDF = df.union(mappedDF)
-      joinedDF
-    }
-    else {
-      df
-    }
-    finaDF
-  }
-
-  def getCountsByClass(spark: SparkSession, label: String, df: DataFrame): DataFrame = {
-    val numberOfClasses = df.select("label").distinct().count()
-    val aggregatedCounts = df.groupBy(label).agg(count(label)).take(numberOfClasses.toInt) //FIXME
-
-    val sc = spark.sparkContext
-    val countSeq = aggregatedCounts.map(x => (x(0).toString, x(1).toString.toInt)).toSeq
-    val rdd = sc.parallelize(countSeq)
-
-    spark.createDataFrame(rdd)
-  }
-
-  def convertFeaturesToVector(df: DataFrame): DataFrame = {
-    val spark = df.sparkSession
-    import spark.implicits._
-    val convertToVector = udf((array: Seq[Double]) => {
-      Vectors.dense(array.map(_.toDouble).toArray)
-    })
-
-    df.withColumn("features", convertToVector($"features"))
-  }
-
   def main(args: Array[String]) {
 
     val filename = "/home/ford/data/sampling_input.txt"
@@ -301,13 +208,12 @@ object Sampling {
     Logger.getLogger("org").setLevel(Level.ERROR)
 
     val spark = SparkSession.builder().getOrCreate()
+    import spark.implicits._
+
     val df = spark.read.
       option("inferSchema", true).
       option("header", true).
       csv(input_file).withColumnRenamed(labelColumnName, "label")
-
-    import spark.implicits._
-    import spark.implicits._
 
     val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
 
@@ -318,8 +224,6 @@ object Sampling {
       //NOTE - This needs to be back in the original order to train/test works correctly
       (r._1, cls, rowMapped.reverse)
     })
-
-
 
     val results: DataFrame = data.toDF().withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
@@ -339,24 +243,7 @@ object Sampling {
     datasetIndexed.show()
     datasetIndexed.printSchema()
 
-
-    //val labelMap = datasetIndexed.select("originalLabel", "label").distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
-    //val labelMapReversed = labelMap.map(x=>(x._2, x._1))
-
-
-
     val converted: DataFrame = convertFeaturesToVector(datasetIndexed)
-
-    /*
-
-    val asDense = udf((v: SparseVector) => {
-      val denseVector = v.toDense
-      org.apache.spark.mllib.linalg.Vectors.fromML(denseVector)
-    })// v.toDense)
-
-     */
-
-    // val asDense = udf((v: SparseVector) => v.toDense)
 
     val asDense = udf((v: Any) => {
       if(v.isInstanceOf[SparseVector]) {
@@ -408,7 +295,7 @@ object Sampling {
       val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
       val trainData = scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)).persist()
 
-      getCountsByClass(spark, "label", trainData).show
+      getCountsByClass("label", trainData).show(100)
 
       println("original size: " + trainData.count())
 
@@ -498,13 +385,12 @@ object Sampling {
          model.transform(trainData)
        }
        else {
-         //sampleData(spark, trainData, samplingMethod)
          trainData
        }
        // sampledData.show
 
        println("new total count: " + sampledData.count())
-       getCountsByClass(spark, "label", sampledData).show
+       getCountsByClass("label", sampledData).show
        sampledData.printSchema()
 
        val t1 = System.nanoTime()
@@ -661,46 +547,6 @@ object Sampling {
     confusionMatrix.printSchema()
 
     calculateClassifierResults(indexedTest.select("label").distinct(), confusionMatrix, labels)
-    //Array[String]()
-  }
-
-
-
-
-  /*************************************************/
-
-
-
-  def sampleData(spark: SparkSession, df: DataFrame, samplingMethod: String): DataFrame = {
-    val d = df.select("label").distinct()
-    val presentClasses: Array[Int] = d.select("label").rdd.map(r => r(0)).collect().map(x=>x.toString.toInt)
-
-    val counts = getCountsByClass(spark, "label", df)
-    val maxClassCount = counts.select("_2").agg(max("_2")).take(1)(0)(0).toString.toInt
-    val minClassCount = counts.select("_2").agg(min("_2")).take(1)(0)(0).toString.toInt
-
-    val overSampleCount = maxClassCount
-    val underSampleCount = minClassCount
-    val smoteSampleCount = maxClassCount // / 2
-
-    val myDFs: Array[(Int, DataFrame)] = presentClasses.map(x=>(x, df.filter(df("label") === x).toDF()))
-
-    val classDF: Array[DataFrame] = presentClasses.map(x => sampleDataParallel(spark, myDFs.filter(y=>y._1 == x)(0)._2, x, samplingMethod, underSampleCount, overSampleCount, smoteSampleCount))
-    val r = classDF.reduce(_ union _)
-    r
-  }
-
-
-  def sampleDataParallel(spark: SparkSession, df: DataFrame, presentClass: Int, samplingMethod: String, underSampleCount: Int, overSampleCount: Int, smoteSampleCount: Int): DataFrame = {
-    val l = presentClass
-    val currentCase = df.filter(df("label") === l).toDF()
-    val filteredDF2 = samplingMethod match {
-      case "undersample" => underSample(spark, currentCase, underSampleCount)
-      case "oversample" => overSample(spark, currentCase, overSampleCount)
-      case "smote" => smote(spark, currentCase, smoteSampleCount)
-      case _ => currentCase
-    }
-    filteredDF2
   }
 
 }

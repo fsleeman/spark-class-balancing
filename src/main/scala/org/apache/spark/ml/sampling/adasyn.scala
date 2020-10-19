@@ -6,7 +6,7 @@ import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
+import org.apache.spark.ml.sampling.utilities._
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
@@ -44,10 +44,10 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
       }
 
       val randomIndicies = (0 until examplesToCreate).map(_ => minorityIndicies.toVector(Random.nextInt(minorityIndicies.length)))
-      (0 until examplesToCreate).map(x => Row(0L, label, neighborFeatures(randomIndicies(x)))).toArray
+      (0 until examplesToCreate).map(x => Row(label, neighborFeatures(randomIndicies(x)))).toArray
     } else {
       val features: Array[Double] = neighborFeatures.head.toArray // FIXME - wut?
-      (0 until examplesToCreate).map(_ => Row(0L, label, Vectors.dense(features).toDense)).toArray
+      (0 until examplesToCreate).map(_ => Row(label, Vectors.dense(features).toDense)).toArray
     }
   }
 
@@ -59,7 +59,6 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     val G = samplesToAdd
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      //.setTopTreeSize($(topTreeSize))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
@@ -108,7 +107,6 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
       .withColumnRenamed("labelIndexed",  $(labelCol))
     datasetIndexed.show()
     datasetIndexed.printSchema()
-
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
