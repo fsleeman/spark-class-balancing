@@ -66,8 +66,7 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     val minorityDF = df.filter(df($(labelCol)) === minorityClassLabel)
 
     /*** For each minority example, calculate the m nn's in training set***/
-       val model = new KNN().setFeaturesCol($(featuresCol))
-      //.setTopTreeSize($(topTreeSize))
+    val model = new KNN().setFeaturesCol($(featuresCol))
        .setTopTreeSize(calculateToTreeSize($(topTreeSize), minorityDF.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
@@ -77,9 +76,6 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
 
     val fitModel = model.fit(minorityDF)
     val minorityDataNeighbors = fitModel.transform(minorityDF)
-
-    minorityDataNeighbors.show()
-    minorityDataNeighbors.printSchema()
 
     val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(minorityDF.count.toInt))
     val collected = minorityDataNeighbors.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect

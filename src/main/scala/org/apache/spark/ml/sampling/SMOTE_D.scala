@@ -4,12 +4,12 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.ml.sampling.utils.pointDifference
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.expressions.UserDefinedFunction
@@ -30,7 +30,7 @@ private[ml] trait SMOTEDModelParams extends Params with HasFeaturesCol with HasL
 class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDModel] with SMOTEDModelParams {
   def this() = this(Identifiable.randomUID("smoteD"))
 
-  val knnK = 5
+  val knnK = 5 // FIXME - make parameter
 
   private val calculateDistances: UserDefinedFunction = udf((neighbors: scala.collection.mutable.WrappedArray[DenseVector]) => {
     (1 until neighbors.length).map(x=>pointDifference(neighbors(0).toArray, neighbors(x).toArray))
@@ -55,7 +55,6 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
 
     // FIXME - only samples upto the required count
 
-
     def addOffset(x: Array[Double], distanceLine: Array[Double], offset: Double): Array[Double] = {
       Array[Array[Double]](x, distanceLine).transpose.map(x=>x(0) + x(1)*offset)
     }
@@ -69,7 +68,6 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     x.reduce(_ union _).toArray.take(numberToAdd)
   }
 
-
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
     val df = dataset.toDF
     val spark = df.sparkSession
@@ -77,7 +75,6 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     import spark.implicits._
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      // .setTopTreeSize($(topTreeSize))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
@@ -89,42 +86,25 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     val neighbors = f.transform(dataset).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
 
     val distances = neighbors.withColumn("distances", calculateDistances(neighbors("neighborFeatures")))
-    //distances.show
-
     val std = distances.withColumn("std", calculateStd(distances("distances")))
-    ///std.show
-
     val stdSum = std.select("std").collect.map(x=>x(0).toString.toDouble).sum
-
     val stdWeights = std.withColumn("stdWeights", std("std")/stdSum)
-    //stdWeights.show
-
     val localDistanceWeights = stdWeights.withColumn("localDistanceWeights", calculateLocalDistanceWeights(stdWeights("distances")))
-    localDistanceWeights.show
 
     val calculateSamplesToAdd = udf((std: Double, distances: scala.collection.mutable.WrappedArray[Double]) => {
       (std * samplesToAdd).toInt + 1 // fix for too few values based on rounding
     })
 
     val samplesToAddDF = localDistanceWeights.withColumn("samplesToAdd", calculateSamplesToAdd(localDistanceWeights("stdWeights"), localDistanceWeights("localDistanceWeights")))
-    println("samples to add: " + samplesToAdd)
-
     val sortDF = samplesToAddDF.sort(col("stdWeights").desc)
 
     val partitionWindow = Window.partitionBy(col($(labelCol))).orderBy($"samplesToAdd".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     val sumTest = sum($"samplesToAdd").over(partitionWindow)
     val runningTotals = sortDF.select($"*", sumTest as "running_total")
-
     val filteredTotals = runningTotals.filter(runningTotals("running_total") <= samplesToAdd) // FIXME - use take if less then amount
-    println("samples to add: " + samplesToAdd)
-    println("~~~~~" + filteredTotals.count)
-    filteredTotals.printSchema()
 
     val addedSamples: Array[Array[Array[Double]]] = filteredTotals.collect.map(x=>sampleExistingExample(x(7).asInstanceOf[Int], x(3).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
-    println("addedSamples: " + addedSamples.length)
     val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(minorityClassLabel, x))
-
-    // println(collectedSamples.length)
 
     spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(collectedSamples), dataset.schema)
   }
@@ -137,8 +117,6 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     val datasetIndexed = indexer.fit(dataset).transform(dataset)
       .withColumnRenamed($(labelCol), "originalLabel")
       .withColumnRenamed("labelIndexed",  $(labelCol))
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))

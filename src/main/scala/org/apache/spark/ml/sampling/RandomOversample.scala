@@ -1,22 +1,14 @@
 package org.apache.spark.ml.sampling
 
-import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.ml.feature.StringIndexer
-import org.apache.spark.ml.knn.KNNModel
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.linalg.VectorUDT
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
-import org.apache.spark.ml.util.{Identifiable, SchemaUtils}
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{DataFrame, Dataset}
-import org.apache.spark.sql.types.{ArrayType, DoubleType, StructType}
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
+import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.sql.Dataset
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, Row}
 
-import scala.collection.mutable
-import scala.util.Random
-import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
@@ -37,7 +29,6 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
   def this() = this(Identifiable.randomUID("randomOversample"))
 
   def oversample(df: DataFrame, numSamples: Int): DataFrame = {
-    println("oversample with " + numSamples)
     var samples = Array[Row]() //FIXME - make this more parallel
     val spark = df.sparkSession
     //FIXME - some could be zero if split is too small

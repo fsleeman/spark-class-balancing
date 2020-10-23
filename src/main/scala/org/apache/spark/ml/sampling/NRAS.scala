@@ -1,25 +1,22 @@
 package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.sampling.utils.{Element, getCountsByClass}
+import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, lit, udf}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.ml.classification.LogisticRegression
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import utils.getMatchingClassCount
-import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 
 import scala.collection.mutable
 import scala.util.Random
-
-
 
 /** Transformer Parameters*/
 private[ml] trait NRASModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
@@ -44,13 +41,9 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
   }
 
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
-    println("**** samples to add: " + samplesToAdd)
     val spark = dataset.sparkSession
     import spark.implicits._
-    println(dataset.take(1)(0))
 
-    dataset.show()
-    dataset.printSchema()
     val lr = new LogisticRegression()
       .setMaxIter(10)
       .setTol(1e-6)
@@ -65,15 +58,9 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
       }
     }
 
-    println("model label index: " + labelIndex + " cls: " + lrModel.summary.labels(labelIndex))
-
     val propensity = lrModel.transform(dataset)
-    propensity.show()
-    propensity.printSchema()
-
     val minorityClassProbablity = udf((probs: DenseVector, i: Int) => probs(i))
     val probs = propensity.withColumn("minorityClassProbability", minorityClassProbablity(propensity("probability"), lit(labelIndex)))
-    probs.show
 
     val addPropensityValue = udf((features: DenseVector, probability: Double) => {
       Vectors.dense(features.toArray :+ probability).toDense
@@ -103,26 +90,17 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
 
     neighborClassFiltered.show
 
-    // Check is filtered data is empty
+    // Check is filtered data is empty // FIXME
     val dataForSmote1 = if(neighborClassFiltered.count() > 0) {
       neighborClassFiltered
     } else {
       neighborCounts
-    } //withColumn("neighborFeatures", $"neighbors.features").select($(labelCol), $(featuresCol), "neighborFeatures")
+    }
 
     val dataForSmote = dataForSmote1.withColumn("neighborFeatures", $"neighbors.features").select($(labelCol), $(featuresCol), "neighborFeatures")
-    println("~~ at dataForSmote")
-    dataForSmote.show
-    dataForSmote.printSchema()
-    val dataForSmoteCollected = dataForSmote.collect()//dataForSmote.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
-    //dataForSmote.withColumn("neighborFeatures", $"neighbors.features").show()
-    //dataForSmote.withColumn("neighborFeatures", $"neighbors.features").printSchema()
-
-    println("dataForSmoteCollected: " + dataForSmoteCollected.length)
+    val dataForSmoteCollected = dataForSmote.collect()
     val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(dataForSmoteCollected.length))
     val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(dataForSmoteCollected(x)))), dataset.schema)
-
-    println("createSamples "  + createdSamples.count)
 
     createdSamples
   }
@@ -135,8 +113,6 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
     val datasetIndexed = indexer.fit(dataset).transform(dataset)
       .withColumnRenamed($(labelCol), "originalLabel")
       .withColumnRenamed("labelIndexed",  $(labelCol))
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))

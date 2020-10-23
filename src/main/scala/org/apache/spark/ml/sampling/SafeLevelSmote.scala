@@ -4,20 +4,18 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.sql.functions.{desc, udf, lit}
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.functions.{desc, udf}
+import org.apache.spark.sql.{DataFrame, Row}
 
 import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.sql._
 import org.apache.spark.sql.types.StructType
-
-
 
 
 /** Transformer Parameters*/
@@ -80,7 +78,7 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
 
     // FIXME - move to transform function
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize($(topTreeSize)) // FIXME
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -90,14 +88,11 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
     val fitModel: KNNModel = model.fit(dataset)
     val fullNearestNeighborDF = fitModel.transform(dataset)
 
-    println("*** dfNeighborRatio ****")
-    val dfNeighborRatio = fullNearestNeighborDF.withColumn("pClassCount", getSafeNeighborCount($"neighbors.label", $"label")).drop("neighbors")
-    dfNeighborRatio.show
-    println(dfNeighborRatio.count)
-
+    val dfNeighborRatio = fullNearestNeighborDF.withColumn("pClassCount",
+      getSafeNeighborCount($"neighbors.label", $"label")).drop("neighbors")
 
     val model2 = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize($(topTreeSize)) // FIXME
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -113,24 +108,12 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
     val spark = minorityNearestNeighbor.sparkSession
     import spark.implicits._
 
-
-    println("minorityDF")
     val minorityDF = minorityNearestNeighbor.filter(minorityNearestNeighbor($(labelCol)) === minorityClassLabel)
     val minorityFilteredDF = minorityDF.filter(minorityNearestNeighbor("pClassCount")=!=0)
-    minorityFilteredDF.show
-    minorityFilteredDF.printSchema()
 
     if(minorityFilteredDF.count() > 0) {
       val minorityRatiosDF = minorityFilteredDF.withColumn("ratios", getRatios($"pClassCount", $"neighbors.pClassCount")).withColumn("neighborsFeatures", $"neighbors.features")  //getRatios($"pClassCount", $"neighbors.pClassCount"))
-      minorityRatiosDF.show()
-      minorityRatiosDF.printSchema()
-
-      println("samples to add: " + samplesToAdd)
-      println("current counts: " + minorityRatiosDF.count)
-
       val samplingRate = Math.ceil(samplesToAdd / minorityRatiosDF.count.toDouble).toInt
-
-      println(minorityRatiosDF.select("ratios").take(1)(0))
 
       val syntheticExamples: Array[Row] = minorityRatiosDF.collect().map(x=>generateExamples(x(0).asInstanceOf[Double],
         x(1).asInstanceOf[DenseVector], x(5).asInstanceOf[mutable.WrappedArray[DenseVector]],
@@ -152,7 +135,6 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
       val model = r.fit(minorityDFSelected).setSingleClassOversampling(samplesToAdd)
       model.transform(minorityDFSelected).toDF()
     }
-
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
@@ -178,15 +160,11 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
     val nearestNeighborDF = calculateNeighborRatioDF(datasetSelected)
-    println("nearestNeighborDF")
-    nearestNeighborDF.show()
-
-    // val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
-    // .map(x=>oversample(nearestNeighborDF, datasetSelected.schema, x._1, getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(), majorityClassCount, $(samplingRatios))))
 
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
-      .map(x=>oversample(nearestNeighborDF, datasetSelected.schema, x._1, getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(), majorityClassCount, $(samplingRatios))))
-
+      .map(x=>oversample(nearestNeighborDF, datasetSelected.schema, x._1,
+        getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(),
+          majorityClassCount, $(samplingRatios))))
 
     val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
     val restoreLabel = udf((label: Double) => labelMapReversed(label))

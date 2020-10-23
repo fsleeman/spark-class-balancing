@@ -3,23 +3,16 @@ package org.apache.spark.ml.sampling
 import org.apache.spark.ml._
 import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.feature.StringIndexer
-import org.apache.spark.ml.knn.{KNN, KNNModel}
-import org.apache.spark.ml.linalg.{DenseVector, VectorUDT, Vectors}
+import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.param.shared._
-import org.apache.spark.ml.util.{SchemaUtils, _}
+import org.apache.spark.ml.util._
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{col, desc, udf}
-import org.apache.spark.sql.types.{StructField, StructType}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
-import org.apache.spark.ml.sampling.Sampling._
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
-
-import scala.collection.mutable
-import org.apache.spark.mllib.linalg.MatrixImplicits._
-import org.apache.spark.mllib.linalg.VectorImplicits._
-import org.apache.spark.mllib.linalg.{DenseMatrix => OldDenseMatrix, DenseVector => OldDenseVector, Matrices => OldMatrices, Vector => OldVector, Vectors => OldVectors}
 
 import scala.util.Random
 
@@ -64,33 +57,6 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     getSmotePoint(a, b)
   }
 
-  /// FIXME - check parameters
-  /* private def sampleCluster(df: DataFrame, cls: Int, samplesToAdd: Int): Array[Row] = {
-
-    val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
-      .setTopTreeLeafSize($(topTreeLeafSize))
-      .setSubTreeLeafSize($(subTreeLeafSize))
-      .setK($(k) + 1) // include self example
-      .setAuxCols(Array($(labelCol), $(featuresCol)))
-      .setBalanceThreshold($(balanceThreshold))
-
-    val fitModel: KNNModel = model.fit(df)
-    val neighborsDF = fitModel.transform(df)
-    neighborsDF.show
-
-    val collected = neighborsDF.collect()
-    val count = df.count.toInt
-
-    // examples/k neighbors/features of Doubles
-    val examples: Array[Array[Array[Double]]] = collected.map(x=>x(4).toString.substring(13, x(4).toString.length - 3).split("]], ").map(x=>x.split(""",\[""")(1)).map(y=>y.split(",").map(z=>z.toDouble))) // FIMXE
-    val randomIndicies = (0 to samplesToAdd).map(_ => Random.nextInt(count))
-
-    val syntheticExamples = randomIndicies.par.map(x=>getSmoteExample(examples(x))).toArray
-
-    syntheticExamples.map(x=>Row(0, cls, Vectors.dense(x)))
-  } */
-
   val toArr: Any => Array[Double] = _.asInstanceOf[DenseVector].toArray
   val toArrUdf: UserDefinedFunction = udf(toArr)
 
@@ -99,10 +65,6 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
   }
 
   private def getSparsity(data: Dataset[Row], imbalancedRatio: Double): Double = {
-    // calculate all distances for minority class
-    println("at sparsitiy count " + data.count())
-    // data.show()
-    data.printSchema()
     // FIXME - use dataset schema access method
     val collected: Array[Array[Double]] =  data.withColumn($(featuresCol), toArrUdf(col($(featuresCol)))).select($(featuresCol)).collect().map(x=>x.toString.substring(14, x.toString.length-2).split(",").map(x=>x.toDouble)) // FIXME
     val n = collected.length // number of minority examples in cluster
@@ -136,6 +98,7 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     collected.map(x=>getInstanceAverageDistance(x, collected)).sum / collected.length.toDouble
   }
 
+  // FIXME - use this code again?
   // FIXME - Fix hard coded code that fixes for small clusters
   def sampleCluster(df: DataFrame, samplesToAdd: Int): DataFrame ={
     if(df.count < 100) {
@@ -154,11 +117,7 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
 
   // fixme - issue with some parameter settings resulting in no clusters for oversampling
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
-    println("Adding samples... " + samplesToAdd)
-
     val numberOfFeatures = dataset.select($(featuresCol)).take(1)(0)(0).asInstanceOf[DenseVector].size
-    println("number of Features : " + numberOfFeatures)
-
     val spark = dataset.sparkSession
 
     // STEP 1
@@ -171,48 +130,19 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     val imbalancedRatios: Array[Double] = clusters.map(x=>getImbalancedRatio(spark, x, minorityClassLabel))
 
     val filteredClusters = (0 until $(clusterK)).map(x=>(imbalancedRatios(x), clusters(x))).filter(x=>x._1 < $(imbalanceRatioThreshold)).map(x=>x._2).map(x=>x.filter(x($(labelCol))===minorityClassLabel))
-    println("^^^^^^ legnth: " + filteredClusters.length)
 
     val averageDistances = filteredClusters.indices.map(x=>getAverageDistance(filteredClusters(x))).toArray
-    for(x<-averageDistances) {
-      println("avg distance: " + x)
-    }
 
-    for(x<-filteredClusters.indices) {
-      println("cluster count: " + filteredClusters(x).count)
-    }
     // FIXME, this doesnt really work with high dimensional data
     val densities = filteredClusters.indices.map(x=>filteredClusters(x).count.toDouble / Math.pow(averageDistances(x), numberOfFeatures))
-    for(x<-densities) {
-      println("densities: " + x)
-    }
     val sparsities = densities.indices.map(x=>1/densities(x))
-
-    for(x<-sparsities) {
-      println("sparsities: " + x)
-    }
-
     val clusterWeights = sparsities.indices.map(x=>sparsities(x)/sparsities.sum)
-
-    for(x<-clusterWeights) {
-      println("cluster weight: " + x)
-    }
-
     val clusterSamples = clusterWeights.indices.map(x=>(samplesToAdd*clusterWeights(x)).toInt)
 
-    println("Counts")
-    for(x<-clusterSamples) {
-      println(x)
-    }
+    val clusterExamples = filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).toArray
 
-    //df.union(filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).reduce(_ union _))
-    val xx = filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).toArray // .reduce(_ union _)
-    println("length: " + xx.length)
-    for(x<-xx) {
-      println("count: " + x.count())
-    }
 
-    xx.reduce(_ union _)
+    clusterExamples.reduce(_ union _)
   }
 
     override def transform(dataset: Dataset[_]): DataFrame = {

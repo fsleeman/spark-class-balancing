@@ -3,19 +3,15 @@ package org.apache.spark.ml.sampling
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
-
-import scala.collection.mutable
+import org.apache.spark.sql.{DataFrame, Dataset}
 import scala.util.Random
-
-
 
 
 /** Transformer Parameters*/
@@ -37,8 +33,6 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     val majorityValue = K.map(Ki=>Math.exp(-Math.pow(pointDifference(Ki, x)/gamma, 2))) /// FIXME - Super slow
     val minorityValue = k.map(ki=>Math.exp(-Math.pow(pointDifference(ki, x)/gamma, 2))) /// FIXME - Super slow
 
-    //println(majorityValue.sum, minorityValue.sum)
-
     majorityValue.sum - minorityValue.sum
   }
 
@@ -57,12 +51,7 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
 
   def createExample(majorityExamples: Array[Array[Double]], minorityExamples: Array[Array[Double]], gamma: Double,
                     stepSize: Double, numInterations: Int, p: Double): DenseVector = {
-    //println("****** at create Example *****")
-    //println("numIterations: " + numInterations)
-    //println("stopIndex: " + getRandomStopNumber(numInterations, p))
-
     val featureLength = minorityExamples(0).length
-    // println("feature length: " + featureLength)
     var point = minorityExamples(Random.nextInt(minorityExamples.length))
 
     for(x<-0 until getRandomStopNumber(numInterations, p)) {
@@ -80,16 +69,7 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
   }
 
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
-    println("oversample samplesToAdd: " + samplesToAdd)
     val spark = dataset.sparkSession
-    //val counts = getCountsByClass(spark, $(labelCol), dataset.toDF).sort("_2") // FIXME - allow for dataset
-    // val minClassLabel = counts.take(1)(0)(0).toString
-    // val minClassCount = counts.take(1)(0)(1).toString.toInt
-    // val maxClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
-    // val maxClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
-
-    // println(minClassLabel, minClassCount)
-    //println(maxClassLabel, maxClassCount)
 
     val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
     val majorityDF = dataset.filter(dataset($(labelCol)) =!= minorityClassLabel)
@@ -100,17 +80,10 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     val stepSize = 0.01 // optimization step size
     val p = 1.0 // probability of stopping early
 
-    println("majority " + majorityDF.count)
-    majorityDF.show
-    println("minority " + minorityDF.count)
-    minorityDF.show
-
-    val minorityExamples = minorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)//collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
-    val majorityExamples = majorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)//collect.map(row=>row.getValuesMap[Any](row.schema.fieldNames)("features")).map(x=>x.asInstanceOf[DenseVector].toArray)
+    val minorityExamples = minorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)
+    val majorityExamples = majorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)
 
     val addedPoints = (0 until samplesToAdd).map(_=>createExample(majorityExamples, minorityExamples, gamma, stepSize, numInterations, p))
-
-    println("length of points: " + addedPoints.length)
 
     val foo: Array[(Double, DenseVector)] = addedPoints.map(x=>(minorityClassLabel, x)).toArray
     val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
@@ -161,8 +134,6 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
   }
 
 }
-
-
 
 
 /** Estimator Parameters*/

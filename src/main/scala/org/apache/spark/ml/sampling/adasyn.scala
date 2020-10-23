@@ -4,13 +4,13 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
-import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities._
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.StructType
 
@@ -69,8 +69,6 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     val fitModel: KNNModel = model.fit(dataset).setDistanceCol("distances")
     val minorityDataNeighbors = fitModel.transform(minorityDF)
 
-    minorityDataNeighbors.show()
-
     val getMajorityNeighborRatio = udf((array: mutable.WrappedArray[String]) => {
       def isMajorityNeighbor(x1: String, x2: String): Int = {
         if (x1 == x2) {
@@ -90,7 +88,6 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     })
 
     val adjustedRatios = dfNeighborRatio.withColumn("samplesToAdd", getSampleCount($"neighborClassRatio")).withColumn("labels", $"neighbors.label").withColumn("neighborFeatures", $"neighbors.features")
-    adjustedRatios.show()
     val syntheticExamples: Array[Array[Row]] = adjustedRatios.collect.map(x => generateExamples(x))
     val totalExamples: Array[Row] = syntheticExamples.flatMap(x => x.toSeq)
 

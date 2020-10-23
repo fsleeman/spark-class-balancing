@@ -1,26 +1,17 @@
 package org.apache.spark.ml.sampling
 
-import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.ml.feature.StringIndexer
-import org.apache.spark.ml.knn.KNNModel
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.linalg.VectorUDT
 import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
-import org.apache.spark.ml.util.{Identifiable, SchemaUtils}
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{DataFrame, Dataset}
-import org.apache.spark.sql.types.{ArrayType, DoubleType, StructType}
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
+import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.sql.Dataset
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.DataFrame
 
-import scala.collection.mutable
-import scala.util.Random
-import org.apache.spark.ml.knn.{KNN, KNNModel}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
-import org.apache.spark.sql.functions.{desc, udf}
-
+import org.apache.spark.sql.functions.udf
 
 
 /** Transformer Parameters*/

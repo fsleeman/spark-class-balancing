@@ -2,14 +2,14 @@ package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.knn.{KNN, KNNModel}
+import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
-import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{desc, udf}
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row}
 
 import scala.collection.mutable
 import scala.util.Random
@@ -47,7 +47,6 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
   }
 
   def generateSamples(neighbors: Seq[DenseVector], s: Int, range: Double, label: Double): Array[Row] = {
-
     val current = neighbors.head
     val selected: Seq[DenseVector] = Random.shuffle(neighbors.tail).take(s)
     val rows = selected.map(x=>getNewSample(current, x, range)).map(x=>Row(label, x))
@@ -63,7 +62,6 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
     val minorityDF = dataset.filter(dataset($(labelCol))===minorityClassLabel)
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      //.setTopTreeSize($(topTreeSize))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count())) // FIXME - do in all places
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
@@ -73,30 +71,18 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
 
     val fitModel = model.fit(dataset)
     val nearestNeighborDF = fitModel.transform(minorityDF)
-    println("nearestNeighborDF")
-    nearestNeighborDF.show()
-    nearestNeighborDF.printSchema()
 
     // step 2
     // Find DANGER examples: if m'=m (noise), m/2 < m' < m (DANGER), 0 <= m' <= m/2 (safe)
 
     val dfDanger = nearestNeighborDF.filter(isDanger(nearestNeighborDF("neighbors.label")))
-    println("dfDanger count: " + dfDanger.count())
 
-    //dfDanger.show()
-    //println("minorityDF:" + minorityDF.count())
-    //println("danger count:" + dfDanger.count)
     // FIXME - add a divide by zero check
-    println("s value: " + samplesToAdd / dfDanger.count.toDouble)
     val s = (samplesToAdd / dfDanger.count.toDouble).ceil.toInt
-    println(s)
-
 
     // step 3
     // For all DANGER examples, find k nearest examples from minority class
-    // val kValue = 5 /// FIXME - check the k/m values
     val model2 = new KNN().setFeaturesCol($(featuresCol))
-      //.setTopTreeSize($(topTreeSize))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), minorityDF.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
@@ -132,7 +118,6 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
       val negativeDF = dataset.filter(dataset($(labelCol))=!=minorityClassLabel)
 
       val modelNegative = new KNN().setFeaturesCol($(featuresCol))
-        //.setTopTreeSize($(topTreeSize))
         .setTopTreeSize(calculateToTreeSize($(topTreeSize), negativeDF.count()))
         .setTopTreeLeafSize($(topTreeLeafSize))
         .setSubTreeLeafSize($(subTreeLeafSize))
@@ -173,9 +158,6 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
-
-    //val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
-    //  .map(x=>oversample(x._2, x._1.toDouble, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
       .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(), majorityClassCount, $(samplingRatios))))

@@ -1,26 +1,21 @@
 package org.apache.spark.ml.sampling
 
-import com.sun.corba.se.impl.oa.toa.TransientObjectManager
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN}
 import org.apache.spark.ml.sampling.utils.{getCountsByClass, getMatchingClassCount}
 import org.apache.spark.sql.functions.{desc, udf}
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
-import org.apache.spark.sql._
-import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{DataFrame, Dataset}
 
 import scala.collection.mutable
-import scala.util.Random
 import org.apache.spark.sql.functions._
 import org.apache.spark.ml.sampling.utils.pointDifference
 import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.types.StructType
 
@@ -76,22 +71,14 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
   }
 
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
-
     val df = dataset.toDF
     import df.sparkSession.implicits._
     val spark = df.sparkSession
 
     val featureLength = df.select("features").take(1)(0)(0).asInstanceOf[DenseVector].size
-    println("@@@@@@@@@ " + featureLength)
-
-    println("oversample")
-    dataset.printSchema()
 
     val Smin = df.filter(df($(labelCol)) === minorityClassLabel)
     val Smaj = df.filter(df($(labelCol)) =!= minorityClassLabel)
-
-    println("Smin: " + Smin.count())
-    println("Smaj: " + Smaj.count())
 
     /*1) find k1 NNs of minority examples
       2) from minority examples, remove examples with no minority example neighbors
@@ -111,9 +98,10 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
         d) add example
     */
 
+
     /** 1 **/
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize($(topTreeSize)) // FIXME
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k1) + 1) // include self example
@@ -121,22 +109,16 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       .setBalanceThreshold($(balanceThreshold))
 
     val f1: KNNModel = model.fit(df)
-
     val SminNN = f1.transform(Smin)
-    println("*** first knn ****")
-    SminNN.show
+
 
     /** 2 **/
-    SminNN.show()
-    SminNN.printSchema()
+    val Sminf = SminNN.withColumn("nnMinorityCount", getMatchingClassCount($"neighbors.label", col($(labelCol)))).filter("nnMinorityCount > 0")
 
-    val Sminf = SminNN.withColumn("nnMinorityCount", getMatchingClassCount($"neighbors.label", col($(labelCol)))).filter("nnMinorityCount > 0") // .sort("index")
-    println("Sminf")
-    Sminf.show
 
     /** 3 **/
     val model2 = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize($(topTreeSize)) // FIXME
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k2))
@@ -144,10 +126,8 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       .setBalanceThreshold($(balanceThreshold))
 
     val f2: KNNModel = model2.fit(Smaj)
+    val Nmaj = f2.transform(Sminf.drop("neighbors", "nnMinorityCount"))
 
-    val Nmaj = f2.transform(Sminf.drop("neighbors", "nnMinorityCount")) //.sort("index")
-    println("*** NMaj ****")
-    Nmaj.show
 
     /** 4 **/
     Nmaj.printSchema()
@@ -155,39 +135,30 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       .withColumn($(featuresCol), $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     val Sbmaj = spark.sparkContext.parallelize(explodedNeighbors).toDF($(labelCol), $(featuresCol)).distinct()
-    println("~~ Sbmaj")
-    Sbmaj.show
-    println(Sbmaj.count())
+
 
     /** 5 **/
     val model3 = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize($(topTreeSize)) // FIXME
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k3))
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
-
-    println("minorityDF: " + Smin.count)
     val f3: KNNModel = model3.fit(Smin)
-    val Nmin = f3.transform(Sbmaj.drop("neighbors", "nnMinorityCount"))//.sort("index")
+    val Nmin = f3.transform(Sbmaj.drop("neighbors", "nnMinorityCount"))
 
-    Nmin.show
+
     /** 6 **/
     val explodedNeighbors2 = Nmin.select("neighbors").withColumn($(labelCol), $"neighbors.label")
       .withColumn($(featuresCol), $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     // FIXME - correct Simin creation
     val Simin = spark.sparkContext.parallelize(explodedNeighbors2).toDF($(labelCol), $(featuresCol)).distinct()
-    Simin.show
+
 
     /** 7 **/
-
-
-    println("here")
-    println(Sbmaj.count)
-
     val SbmajCollected: Array[DenseVector] = Sbmaj.select($(featuresCol)).collect().map(x=>x(0).asInstanceOf[DenseVector])
 
     val getClosenessFactors = udf((minorityExample: DenseVector) => {
@@ -209,15 +180,11 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     })
 
     val closenessFactors = Simin.withColumn("closeness", getClosenessFactors(Simin($(featuresCol)))) // result is majority data with minority closeness values
-    closenessFactors.show()
-    closenessFactors.printSchema()
-
     val calculateInformationWeights = udf((closenessFactors: mutable.WrappedArray[Double]) => {
       closenessFactors.toArray.map(x=>x*x/closenessFactors.toArray.sum)
     })
 
     val informationWeights = closenessFactors.withColumn("informationWeights", calculateInformationWeights(closenessFactors("closeness")))
-    informationWeights.show
 
 
     /* 8 */ // FIXME - wrong
@@ -226,9 +193,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       informationWeights.toArray.sum
     })
     val selectionWeights = informationWeights.withColumn("selectionWeights", calculateSelectionWeights(informationWeights("informationWeights")))
-    selectionWeights.show
 
-    println("selection weight count: " + selectionWeights.count() )
 
     /* 9 */
     val selectionWeightSum = selectionWeights.select("selectionWeights").collect().map(x=>x(0).asInstanceOf[Double]).sum
@@ -239,8 +204,8 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val selectionProbabilities = selectionWeights.withColumn("selectionProbabilities", calculateSelectionProbabilities(selectionWeights("selectionWeights")))
     selectionProbabilities.show
 
+
     /* 10 */
-    // val clusterKValue = 10 // FIXME - add parameter
     val kmeans = new KMeans().setK($(clusterK))
     val kMeansModel = kmeans.fit(Smin)
     val SiminKMeansClusters = kMeansModel.transform(selectionProbabilities)
@@ -254,19 +219,12 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     /* 12 */
 
     val SiminClustersCollected = SiminKMeansClusters.select($(labelCol), $(featuresCol), "selectionProbabilities", "prediction")
-    SiminClustersCollected.show
 
     val partitionWindow = Window.partitionBy($"label").orderBy($"selectionProbabilities".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     val sumTest = sum($"selectionProbabilities").over(partitionWindow)
     val runningTotals = SiminClustersCollected.select($"*", sumTest as "running_total")
-
-    println("Running totals: ")
-    runningTotals.show()
-
     val runningTotalsCollected = runningTotals.collect()
-
     val groupedClusters = (0 until $(clusterK)).map(x=>runningTotalsCollected.filter(_(3)==x))
-
 
     val r = new scala.util.Random()
 
@@ -288,7 +246,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       (label, Vectors.dense(synthetic).toDense)
     }
 
-    println("Running total collected: " + runningTotalsCollected.length)
     // Perform random oversampling if the class does not have appropriate examples for the standard method
     val syntheticDF = if(runningTotalsCollected.length > 0) {
       val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample())
@@ -301,16 +258,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
       model.transform(Smin).toDF()
     }
-
-    println("example count " + syntheticDF.count())
-
-
-
-    df.show()
-    syntheticDF.show
-
-    df.printSchema()
-    syntheticDF.printSchema()
 
     syntheticDF
   }

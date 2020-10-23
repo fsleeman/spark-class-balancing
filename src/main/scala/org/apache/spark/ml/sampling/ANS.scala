@@ -4,14 +4,14 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasSeed}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf, lit}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row}
 
 import scala.collection.mutable
 import scala.util.Random
@@ -30,17 +30,13 @@ private[ml] trait ANSModelParams extends Params with HasFeaturesCol with HasLabe
   final def setCMaxRatio(value: Double): this.type = set(cMaxRatio, value)
 
   setDefault(cMaxRatio -> 0.25)
-
-
 }
 
 /** Transformer */
 class ANSModel private[ml](override val uid: String) extends Model[ANSModel] with ANSModelParams {
   def this() = this(Identifiable.randomUID("ans"))
 
-
   def createSample(row: Row): Array[Row] = {
-    // val index = row(0).toString.toLong
     val label = row(0).toString.toDouble
     val features: Array[Double] = row(1).asInstanceOf[DenseVector].toArray
     val neighbors = row(2).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail
@@ -81,19 +77,7 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
     val minorityKnnFit: KNNModel = minorityKnnModel.fit(minorityDF).setDistanceCol("distances")
     val neighborDistances = minorityKnnFit.transform(minorityDF).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
 
-    println("---> firstPosNeighborDistances (distance col)")
-    neighborDistances.show()
-    // neighborDistances.printSchema()
-
-    val d = neighborDistances.select("distances").take(10)
-    for(x<-d) {
-      println(x)
-    }
-
     val firstPosNeighborDistances = neighborDistances.withColumn("closestPosDistance", getNearestNeighborDistance($"distances")).drop("distances", "neighborFeatures")
-    println("---> firstPosNeighborDistances (closestPosDistance col)")
-    firstPosNeighborDistances.show
-
 
     val majorityKnnModel: KNN = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), majorityDF.count()))
@@ -103,24 +87,14 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       .setBalanceThreshold($(balanceThreshold))
 
     val majorityKnnFit: KNNModel = majorityKnnModel.fit(majorityDF).setDistanceCol("distances").setMaxDistanceCol("closestPosDistance").setQueryByDistance(true)//.setK(20) // FIXME
-
     val majorityNeighbors = majorityKnnFit.transform(firstPosNeighborDistances).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
-    println("---> majorityNeighbors")
-    majorityNeighbors.show()
-    majorityNeighbors.printSchema()
 
     val getRadiusNeighbors = udf((distances: mutable.WrappedArray[Double]) => {
       distances.length - 1 // ignore self neighbor
     })
 
     val outBorder = majorityNeighbors.withColumn("outBorder", getRadiusNeighbors($"distances"))
-    // println("---> outBorder (outBorder col)")
-    // outBorder.show
-
-    val outBorderArray = outBorder.select("outBorder").collect().map(x => x(0).asInstanceOf[Int])
-    println("outborder " + outBorderArray.length)
-    outBorder.show()
-    // println("max:" + outBorderArray.max)
+        val outBorderArray = outBorder.select("outBorder").collect().map(x => x(0).asInstanceOf[Int])
 
    var previous_number_of_outcasts = -1
    var C = 1
@@ -129,10 +103,7 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
     val loop = new Breaks
     loop.breakable {
       for (c <- 1 until C_max) { // FIXME
-
         val number_of_outcasts = outBorderArray.filter(x => x >= c).sum
-        println("loop " + c + " " + number_of_outcasts + " " + previous_number_of_outcasts)
-
         if (Math.abs(number_of_outcasts - previous_number_of_outcasts) == 0) {
           C = c
           if(outBorder.filter(outBorder("outBorder") < C).count > 0) {
@@ -143,16 +114,8 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       }
     }
 
-    println("C_max: " + C_max)
-    println("C: " + C)
-
     val Pused = outBorder.filter(outBorder("outBorder") < C).drop("distances", "neighborFeatures", "outBorder")
-    println("Pused before: " + outBorder.count())
-    println("Pused count: " + Pused.count)
-    Pused.show
-
     val maxClosestPosDistance = Pused.select("closestPosDistance").collect().map(x=>x(0).toString.toDouble).max
-    println("maxClosestPosDistance: " + maxClosestPosDistance)
 
     val PusedKnnModel: KNN = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), Pused.count()))
@@ -168,24 +131,14 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       .drop("neighbors")
 
     val PusedDistancesNeighborCount = PusedDistances.withColumn("neighborCount", getRadiusNeighbors($"distances"))
-    println("---> PusedDistances")
-    PusedDistancesNeighborCount.show
-    val bar = PusedDistances.select("distances").take(10)
-    for(x<-bar) {
-      println(x)
-    }
 
     val neighborCountSum = PusedDistancesNeighborCount.select("neighborCount").collect().map(x=>x(0).toString.toInt).sum.toDouble
 
-    println("neighborCountSum " + neighborCountSum)
-    println("samples to add: " + samplesToAdd)
     val getSamplesToAdd = udf((count: Int) => {
       Math.ceil((count / neighborCountSum) * samplesToAdd).toInt
     })
 
     val generatedSampleCounts = PusedDistancesNeighborCount.withColumn("samplesToAdd", getSamplesToAdd($"neighborCount"))
-    println("~~~~~ samplesToAdd " + generatedSampleCounts.count())
-    generatedSampleCounts.show()
 
     val syntheticExamples: Array[Array[Row]] = generatedSampleCounts.drop("closestPosDistance", "searchDistance", "distances", "neighborCount").filter("neighborCount > 0")
       .collect.map(x=>createSample(x))
@@ -203,8 +156,6 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       val datasetIndexed = indexer.fit(dataset).transform(dataset)
         .withColumnRenamed($(labelCol), "originalLabel")
         .withColumnRenamed("labelIndexed",  $(labelCol))
-      datasetIndexed.show()
-      datasetIndexed.printSchema()
 
       val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
       val labelMapReversed = labelMap.map(x=>(x._2, x._1))
@@ -215,9 +166,6 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
       val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
-
-      // val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected))
-      //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
       val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
         .map(x=>oversample(x._2, x._1,

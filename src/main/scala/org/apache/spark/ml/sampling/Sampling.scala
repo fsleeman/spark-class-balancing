@@ -3,17 +3,21 @@ package org.apache.spark.ml.sampling
 import java.io.File
 
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.classification.{RandomForestClassifier, LinearSVC, OneVsRest}
 import org.apache.spark.ml.feature.MinMaxScaler
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.ml.linalg.SparseVector
+
 import scala.io.Source
 import org.apache.spark.ml.feature.StringIndexer
+import org.apache.spark.ml.knn.KNN
 import org.apache.spark.mllib.evaluation.MulticlassMetrics
 import org.apache.spark.ml.sampling.utilities.{convertFeaturesToVector, getCountsByClass}
+
+import scala.collection.mutable
 //FIXME - turn classes back to Ints instead of Doubles
 object Sampling {
 
@@ -188,6 +192,113 @@ object Sampling {
     Array(AvAvg.toString, MAvG.toString, RecM.toString, PrecM.toString, Recu.toString, Precu.toString, FbM.toString, Fbu.toString, AvFb.toString, CBA.toString)
   }
 
+
+
+  import org.apache.spark.ml.knn.{KNN, KNNModel}
+  import scala.collection.mutable
+
+  val kValue = 5
+
+  // Map number of nearest same-class neighbors to minority class label
+  def getMinorityClassLabel(kCount: Int): Int = {
+
+    if (kCount / kValue.toFloat >= 0.8) { 0 }
+    else if ( kCount / kValue.toFloat >= 0.4) { 1 }
+    else if ( kCount / kValue.toFloat >= 0.2) { 2 }
+    else { 3 }
+  }
+
+  def getSparkNNMinorityResult(x: mutable.WrappedArray[Any], index: Int, features: Any): (Int, Int, Int, mutable.WrappedArray[Double]) = {
+    val wrappedArray = x
+
+    val nearestLabels = Array[Int]()
+    def getLabel(neighbor: Any): Int = {
+      val index = neighbor.toString.indexOf(",")
+      neighbor.toString.substring(1, index).toInt
+    }
+
+    val currentLabel = getLabel(wrappedArray(0))
+    var currentCount = 0
+    for(i<-1 until wrappedArray.length) {
+      nearestLabels :+ getLabel(wrappedArray(i))
+      if (getLabel(wrappedArray(i)) == currentLabel) {
+        currentCount += 1
+      }
+    }
+    val currentArray = features.toString.substring(1, features.toString.length-1).split(",").map(x=>x.toDouble)
+    (index, currentLabel, getMinorityClassLabel(currentCount), currentArray)//features.toString().asInstanceOf[mutable.WrappedArray[Double]])
+  }
+
+
+  def filterByMinorityType(df: DataFrame, minorityLabels: String): DataFrame ={
+    val minorityType = Map("S" -> 0, "B" -> 1, "R" -> 2, "O" -> 3)
+    val numberValues = minorityLabels.split("").map(x=>minorityType(x))
+    df.filter(df("minorityType").isin(numberValues:_*)).select("index", "label", "features")
+  }
+
+  def getInstanceLevelDifficulty(df: DataFrame): DataFrame ={
+    val path = "/tmp/covtypeDF/"
+
+    val minorityDF = try {
+        println("READ KNN")
+        val readData = df.sparkSession.read.
+          option("inferSchema", true).
+          option("header", true).
+          csv(path)
+
+        val stringToArray = udf((item: String)=>{
+          val features: Array[Double] = item.dropRight(1).drop(1).split(",").map(x=>x.toDouble)
+          Vectors.dense(features).toDense
+        })
+
+        val intToLong = udf((index: Int)=>{
+          index.toLong
+        })
+
+        readData.withColumn("features", stringToArray(col("features"))).withColumn("index", intToLong(col("index")))
+    } catch {
+      case _: Throwable => {
+        val t0 = System.nanoTime()
+        println("CALCULATE KNN")
+        val leafSize = 1000
+        val knn = new KNN()
+          .setTopTreeSize(df.count.toInt / 10)
+          .setTopTreeLeafSize(leafSize)
+          .setSubTreeLeafSize(2500)
+          .setSeed(42L)
+          .setAuxCols(Array("label", "features"))
+        val model = knn.fit(df).setK(kValue+1)//.setDistanceCol("distances")
+        val results2: DataFrame = model.transform(df)
+
+        val collected: Array[Row] = results2.select( "neighbors", "index", "features").collect()
+        val minorityValueDF: Array[(Int, Int, Int, mutable.WrappedArray[Double])] = collected.map(x=>(x(0).asInstanceOf[mutable.WrappedArray[Any]],x(1),x(2))).map(x=>getSparkNNMinorityResult(x._1, x._2.toString.toInt, x._3))
+
+        val minorityDF = df.sparkSession.createDataFrame(df.sparkSession.sparkContext.parallelize(minorityValueDF))
+          .withColumnRenamed("_1","index")
+          .withColumnRenamed("_2","label")
+          .withColumnRenamed("_3","minorityType")
+          .withColumnRenamed("_4","features").sort("index")
+
+        val stringify = udf((vs: Seq[String]) => s"""[${vs.mkString(",")}]""")
+
+        minorityDF.withColumn("features", stringify(col("features"))).
+          repartition(1).
+          write.format("com.databricks.spark.csv").
+          option("header", "true").
+          mode("overwrite").
+          save(path)
+        val t1 = System.nanoTime()
+        println("Elapsed time: " + (t1 - t0) / 1e9 + "s")
+
+        minorityDF
+      }
+    }
+
+    minorityDF
+  }
+
+
+
   def main(args: Array[String]) {
 
     val filename = "/home/ford/data/sampling_input.txt"
@@ -232,18 +343,9 @@ object Sampling {
     results.show()
     results.printSchema()
 
-    val indexer = new StringIndexer()
-      .setInputCol("label")
-      .setOutputCol("labelIndexed")
 
-    val datasetIndexed = indexer.fit(results).transform(results).drop("label").withColumnRenamed("labelIndexed", "label")
-      //.withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label")
-      //.withColumnRenamed("labelIndexed",  "label")
-    println("here")
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
-    val converted: DataFrame = convertFeaturesToVector(datasetIndexed)
+    val converted: DataFrame = convertFeaturesToVector(results)
 
     val asDense = udf((v: Any) => {
       if(v.isInstanceOf[SparseVector]) {
@@ -253,23 +355,39 @@ object Sampling {
       }
     })
 
-    val scaledData1: DataFrame = if(enableDataScaling) {
+    val scaledDataIn: DataFrame = if(enableDataScaling) {
       val scaler = new MinMaxScaler()
         .setInputCol("features")
         .setOutputCol("scaledFeatures")
       val scalerModel = scaler.fit(converted)
       val scaledData: DataFrame = scalerModel.transform(converted)
-      // scaledData.show(1000)
       scaledData.printSchema()
       scaledData.drop("features").withColumn("features", asDense($"scaledFeatures")).drop("scaledFeatures")
-      //scaledData.drop("features").withColumn("features", $"scaledFeatures").drop("scaledFeatures")
-
-  //.withColumnRenamed("scaledFeatures", "features") ..
     } else { converted }.cache()
 
-    val scaledData = scaledData1//.filter(scaledData1("label")===1.0 || scaledData1("label")===2.0 || scaledData1("label")===3.0)
+
+
+    val instanceLevelDF = getInstanceLevelDifficulty(scaledDataIn)
+    println("@@@@")
+    instanceLevelDF.show()
+
+    val indexer = new StringIndexer()
+      .setInputCol("label")
+      .setOutputCol("labelIndexed")
+
+    val datasetIndexed = indexer.fit(instanceLevelDF).transform(instanceLevelDF).drop("label")
+      .withColumnRenamed("labelIndexed", "label")
+
+    println("here")
+    datasetIndexed.show()
+    datasetIndexed.printSchema()
+
+    val scaledData = datasetIndexed
+
 
     // FIXME - add pipeline
+
+
 
     val counts = scaledData.count()
     var splits = Array[Int]()
@@ -277,6 +395,7 @@ object Sampling {
     scaledData.show()
     scaledData.printSchema()
 
+    // splits :+= 2
     splits :+= 0
 
     if(numSplits < 2) {
@@ -291,139 +410,149 @@ object Sampling {
 
     var combinedSplitResults =  Array[Array[String]]()
 
-    for(splitIndex<-0 until numSplits) {
-      val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
-      val trainData = scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)).persist()
+    val minorityTypeList = Array("SBRO") //, "SBR", "SBO",  "SRO", "SB", "SR", "SO", "BRO", "BR", "BO", "RO", "S", "B", "R", "O")
 
-      getCountsByClass("label", trainData).show(100)
+    for(mt<-minorityTypeList) {
+      for(splitIndex<-0 until numSplits) {
+        println("splitIndex: " + splitIndex + " numSplits: " + numSplits)
+        val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
+        val trainData = filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), mt).persist()//scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)).persist() //filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), "SBRO").persist()
+        println("trainSchema")
+        trainData.printSchema()
 
-      println("original size: " + trainData.count())
+        getCountsByClass("label", trainData).show(100)
 
-      val samplingMap: Map[String, Double] =
-        Map( "1" -> 2.0,
-          "2" -> 0.5,
-          "3" -> 2.0,
-          "4" -> 1.0,
-          "5" -> 2.0,
-          "6" -> 2.0,
-          "7" -> 2.0
+        println("original size: " + trainData.count())
 
-        /*Map( "none" -> 1.0,
-          "rRna" -> 10.0,
-          "tRna" -> 20.0,
-          "snRna" -> 20.0,
-          "mRna" -> 40.0,
-          "SRP" -> 40.0,
-          "IRES" -> 40.0*/
-        )
+        val samplingMap: Map[String, Double] =
+          Map( "1" -> 2.0,
+            "2" -> 0.5,
+            "3" -> 2.0,
+            "4" -> 1.0,
+            "5" -> 2.0,
+            "6" -> 2.0,
+            "7" -> 2.0
 
-    // FIXME - make per class map parallel to run faster
+          /*Map( "none" -> 1.0,
+            "rRna" -> 10.0,
+            "tRna" -> 20.0,
+            "snRna" -> 20.0,
+            "mRna" -> 40.0,
+            "SRP" -> 40.0,
+            "IRES" -> 40.0*/
+          )
 
-     var resultArray = Array[Array[String]]()
-     for(samplingMethod <- samplingMethods) {
-       println("$$$$$$$$$$$$$$$$$$$" + samplingMethod + "$$$$$$$$$$$$$$$$$$$")
-       val t0 = System.nanoTime()
-       val sampledData = if(samplingMethod == "kMeansSmote") {
-         val r = new KMeansSMOTE()
-         val model = r.fit(trainData).setBalanceThreshold(0.0)//.setTopTreeSize(2)
-         model.transform(trainData)
-       }  else if(samplingMethod == "borderlineSmote") {
-         val r = new BorderlineSMOTE()
-         val model = r.fit(trainData).setBalanceThreshold(0.0)
-         model.transform(trainData)
-       }  else if(samplingMethod == "rbo") {
-         val r = new RBO()
-         val model = r.fit(trainData)
-         model.transform(trainData)
-       } else if(samplingMethod == "adasyn") {
-         val r = new ADASYN().setBalanceThreshold(0.0)
-         val model = r.fit(trainData)
-         model.transform(trainData)
-       } else if(samplingMethod == "safeLevel") {
-         val r = new SafeLevelSMOTE()
-         val model = r.fit(trainData)
-         model.transform(trainData)
-       } else if(samplingMethod == "smote") {
-         val r = new SMOTE
-         val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)   //.setSamplingRatios(samplingMap)
-         model.transform(trainData)
-       } else if(samplingMethod == "mwmote") {
-         val r = new MWMOTE()
-         val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)
-         model.transform(trainData)
-       } else if(samplingMethod == "ccr") {
-         val r = new CCR()
-         val model = r.fit(trainData).setBalanceThreshold(0.0)// .setTopTreeSize(10)
-         model.transform(trainData)
-       } else if(samplingMethod == "ans") {
-         val r = new ANS()
-         val model = r.fit(trainData).setBalanceThreshold(0.0)
-         model.transform(trainData)
-       } else if(samplingMethod == "clusterSmote") {
-         val r = new ClusterSMOTE()
-         val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)
-         model.transform(trainData)
-       } else if(samplingMethod == "gaussianSmote") {
-         val r = new GaussianSMOTE()
-         val model = r.fit(trainData).setBalanceThreshold(0.0)
-         model.transform(trainData)
-       } else if(samplingMethod == "smote_d") {
-         val r = new SMOTED()
-         val model = r.fit(trainData).setBalanceThreshold(0.0)
-         model.transform(trainData)
-       } else if(samplingMethod == "nras") {
-         val r = new NRAS()
-         val model = r.fit(trainData)
-         model.transform(trainData)
-       }  else if(samplingMethod == "randomOversample") {
-         val r = new RandomOversample() // multi-class done
-         val model = r.fit(trainData)
-         model.transform(trainData)
-       }  else if(samplingMethod == "randomUndersample") {
-         val r = new RandomUndersample() // multi-class done
-         val model = r.fit(trainData)
-         model.transform(trainData)
+      // FIXME - make per class map parallel to run faster
+
+       // var resultArray = Array[Array[String]]()
+       for(samplingMethod <- samplingMethods) {
+         println("$$$$$$$$$$$$$$$$$$$" + samplingMethod + "$$$$$$$$$$$$$$$$$$$")
+         val t0 = System.nanoTime()
+         val sampledData = if(samplingMethod == "kMeansSmote") {
+           val r = new KMeansSMOTE()
+           val model = r.fit(trainData).setBalanceThreshold(0.0)//.setTopTreeSize(2)
+           model.transform(trainData)
+         }  else if(samplingMethod == "borderlineSmote") {
+           val r = new BorderlineSMOTE()
+           val model = r.fit(trainData).setBalanceThreshold(0.0)
+           model.transform(trainData)
+         }  else if(samplingMethod == "rbo") {
+           val r = new RBO()
+           val model = r.fit(trainData)
+           model.transform(trainData)
+         } else if(samplingMethod == "adasyn") {
+           val r = new ADASYN().setBalanceThreshold(0.0)
+           val model = r.fit(trainData)
+           model.transform(trainData)
+         } else if(samplingMethod == "safeLevel") {
+           val r = new SafeLevelSMOTE()
+           val model = r.fit(trainData)
+           model.transform(trainData)
+         } else if(samplingMethod == "smote") {
+           val r = new SMOTE
+           val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)   //.setSamplingRatios(samplingMap)
+           model.transform(trainData)
+         } else if(samplingMethod == "mwmote") {
+           val r = new MWMOTE()
+           val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)
+           model.transform(trainData)
+         } else if(samplingMethod == "ccr") {
+           val r = new CCR()
+           val model = r.fit(trainData).setBalanceThreshold(0.0)// .setTopTreeSize(10)
+           model.transform(trainData)
+         } else if(samplingMethod == "ans") {
+           val r = new ANS()
+           val model = r.fit(trainData).setBalanceThreshold(0.0)
+           model.transform(trainData)
+         } else if(samplingMethod == "clusterSmote") {
+           val r = new ClusterSMOTE()
+           val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)
+           model.transform(trainData)
+         } else if(samplingMethod == "gaussianSmote") {
+           val r = new GaussianSMOTE()
+           val model = r.fit(trainData).setBalanceThreshold(0.0)
+           model.transform(trainData)
+         } else if(samplingMethod == "smote_d") {
+           val r = new SMOTED()
+           val model = r.fit(trainData).setBalanceThreshold(0.0)
+           model.transform(trainData)
+         } else if(samplingMethod == "nras") {
+           val r = new NRAS()
+           val model = r.fit(trainData)
+           model.transform(trainData)
+         }  else if(samplingMethod == "randomOversample") {
+           val r = new RandomOversample() // multi-class done
+           val model = r.fit(trainData)
+           model.transform(trainData)
+         }  else if(samplingMethod == "randomUndersample") {
+           val r = new RandomUndersample() // multi-class done
+           val model = r.fit(trainData)
+           model.transform(trainData)
+         }
+         else {
+           trainData
+         }
+
+         println("new total count: " + sampledData.count())
+         getCountsByClass("label", sampledData).show
+         sampledData.printSchema()
+
+         val t1 = System.nanoTime()
+
+         val savePathString = savePath
+         val saveDirectory = new File(savePathString)
+         if (!saveDirectory.exists()) {
+           saveDirectory.mkdirs()
+         }
+
+         val x: Array[String] = Array(samplingMethod, mt) ++ runClassifierMinorityType(classifier, sampledData, testData) ++ Array(((t1 - t0) / 1e9).toString)
+
+         resultArray = resultArray :+ x
+         combinedSplitResults = combinedSplitResults :+ x
        }
-       else {
-         trainData
-       }
-       // sampledData.show
 
-       println("new total count: " + sampledData.count())
-       getCountsByClass("label", sampledData).show
-       sampledData.printSchema()
+       val resultsDF = buildResultDF(spark, resultArray)
+       println("Split Number: " + splitIndex)
+       resultsDF.show
 
-       val t1 = System.nanoTime()
 
-       val savePathString = savePath
-       val saveDirectory = new File(savePathString)
-       if (!saveDirectory.exists()) {
-         saveDirectory.mkdirs()
-       }
+        // FIXME - save path for method as well
+       resultsDF.repartition(1).
+         write.format("com.databricks.spark.csv").
+         option("header", "true").
+         mode("overwrite").
+         save(savePath + "/" + splitIndex)
 
-       val x: Array[String] = Array(samplingMethod) ++ runClassifierMinorityType(sampledData, testData) ++ Array(((t1 - t0) / 1e9).toString)
-
-       resultArray = resultArray :+ x
-       combinedSplitResults = combinedSplitResults :+ x
-     }
-
-     val resultsDF = buildResultDF(spark, resultArray)
-     println("Split Number: " + splitIndex)
-     resultsDF.show
-
-     resultsDF.repartition(1).
-       write.format("com.databricks.spark.csv").
-       option("header", "true").
-       mode("overwrite").
-       save(savePath + "/" + splitIndex)
-
-     trainData.unpersist()
-     testData.unpersist()
+       trainData.unpersist()
+       testData.unpersist()
+      }
     }
 
     // println("Total")
     val totalResults = buildResultDF(spark, combinedSplitResults)
-    val totals = totalResults.groupBy("sampling").agg(avg("AvAvg").as("AvAvg"),
+
+    // first("mt").as("mt"),
+    val totals = totalResults.groupBy("sampling", "mt").agg(avg("AvAvg").as("AvAvg"),
       avg("MAvG").as("MAvG"), avg("RecM").as("RecM"), avg("Recu").as("Recu"),
       avg("PrecM").as("PrecM"), avg("Precu").as("Precu"), avg("FbM").as("FbM"),
       avg("Fbu").as("Fbu"), avg("AvFb").as("AvFb"), avg("CBA").as("CBA"), avg("time").as("time"))
@@ -445,22 +574,23 @@ object Sampling {
       }
     }
     val csvResults = resultArray.map(x => x match {
-      case Array(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11) => (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11)
+      case Array(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12) => (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12)
     }).toSeq
     val c = spark.sparkContext.parallelize(csvResults).toDF
     val lookup = Map(
       "_1" -> "sampling",
-      "_2" -> "AvAvg",
-      "_3" -> "MAvG",
-      "_4" -> "RecM",
-      "_5" -> "Recu",
-      "_6" -> "PrecM",
-      "_7" -> "Precu",
-      "_8" -> "FbM",
-      "_9" -> "Fbu",
-      "_10" -> "AvFb",
-      "_11" -> "CBA",
-      "_12" -> "time"
+      "_2" -> "mt",
+      "_3" -> "AvAvg",
+      "_4" -> "MAvG",
+      "_5" -> "RecM",
+      "_6" -> "Recu",
+      "_7" -> "PrecM",
+      "_8" -> "Precu",
+      "_9" -> "FbM",
+      "_10" -> "Fbu",
+      "_11" -> "AvFb",
+      "_12" -> "CBA",
+      "_13" -> "time"
     )
 
     val cols = c.columns.map(name => lookup.get(name) match {
@@ -471,7 +601,7 @@ object Sampling {
     c.select(cols: _*)
   }
 
-  def runClassifierMinorityType(train: DataFrame, test: DataFrame): Array[String] ={
+  def runClassifierMinorityType(classifier: String, train: DataFrame, test: DataFrame): Array[String] ={
 
     import train.sparkSession.implicits._
     val indexer = new StringIndexer()
@@ -494,17 +624,26 @@ object Sampling {
     //val minLabel: Double = indexedTest.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble).min
     // val inputCols = test.columns.filter(_ != "label")
 
-    val classifier = new RandomForestClassifier().setNumTrees(10).
-      setSeed(42L).
-      setLabelCol("label").
-      setFeaturesCol("features").
-      setPredictionCol("prediction")
+    val cls = if(classifier == "svm") {
+      val lsvm = new LinearSVC()
+        .setMaxIter(50)
+        .setRegParam(0.1)
+
+      new OneVsRest().setClassifier(lsvm)
+    } else {
+      new RandomForestClassifier().setNumTrees(50).
+        setSeed(42L).
+        setLabelCol("label").
+        setFeaturesCol("features").
+        setPredictionCol("prediction")
+    }
+
 
     indexedTrain.show
     indexedTrain.printSchema()
 
 
-    val model = classifier.fit(indexedTrain)
+    val model = cls.fit(indexedTrain)
     val predictions: DataFrame = model.transform(indexedTest)
 
     predictions.show(100)
@@ -521,7 +660,7 @@ object Sampling {
 */
 
     import org.apache.spark.mllib.linalg.Vectors
-    val predictionAndLabels = test.select("label", "features").map { row =>
+    /*val predictionAndLabels = test.select("label", "features").map { row =>
       val f = row(1).asInstanceOf[DenseVector]
 
       val prediction = model.predict(f)
@@ -533,7 +672,7 @@ object Sampling {
 
     println("Confusion matrix:")
     println(metrics.confusionMatrix)
-    println(metrics)
+    println(metrics)*/
 
     val labels: Array[Double] = labelMap.values.toArray.sorted
 

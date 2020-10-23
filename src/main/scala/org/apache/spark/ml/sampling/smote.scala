@@ -2,8 +2,8 @@ package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.param.{DoubleParam, Param, ParamMap, ParamValidators, Params}
-import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCol, HasInputCols, HasOutputCol, HasSeed}
+import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
@@ -72,7 +72,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     datasetIndexed.show()
     datasetIndexed.printSchema()
 
-        val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
 
     val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
