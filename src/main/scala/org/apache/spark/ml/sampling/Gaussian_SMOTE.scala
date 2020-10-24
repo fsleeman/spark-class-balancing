@@ -7,13 +7,14 @@ import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
+import org.apache.spark.mllib.random.RandomRDDs._
 
 import scala.collection.mutable
 import scala.util.Random
@@ -22,6 +23,16 @@ import scala.util.Random
 /** Transformer Parameters*/
 private[ml] trait GaussianSMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
 
+  /**
+    * Param for gaussian sigma.
+    * @group param
+    */
+  final val sigma: Param[Double] = new Param[Double](this, "sigma", "gaussian sigma")
+
+  /** @group getParam */
+  final def setSigma(value: Double): this.type = set(sigma, value)
+
+  setDefault(sigma -> 0.5)
 }
 
 /** Transformer */
@@ -50,10 +61,9 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     val randmPoint = Random.nextDouble()
     val gap = features.indices.map(x => (randomNeighbor(x) - features(x)) * randmPoint).toArray
 
-    val sigma = 0.5 // FIXME - make it a parameter
     // FIXME - ask if this should be multi-dimensional?
-    val ranges = features.indices.map(x => getGaussian(gap(x), sigma)).toArray
-    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, ranges).transpose.map(x => x(0) + (x(1) - x(0) * x(2)))).toDense // FIXME - check formula
+    val ranges = features.indices.map(x => getGaussian(gap(x), $(sigma))).toArray
+    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, ranges).transpose.map(x => x(0) + (x(1) - x(0) * x(2)))).toDense // FIXME - check formula form paper
 
     Row(label, syntheticExample)
   }
@@ -67,7 +77,7 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
 
     /*** For each minority example, calculate the m nn's in training set***/
     val model = new KNN().setFeaturesCol($(featuresCol))
-       .setTopTreeSize(calculateToTreeSize($(topTreeSize), minorityDF.count()))
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), minorityDF.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -77,9 +87,11 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     val fitModel = model.fit(minorityDF)
     val minorityDataNeighbors = fitModel.transform(minorityDF)
 
-    val randomIndicies = (0 until samplesToAdd).map(_=>Random.nextInt(minorityDF.count.toInt))
+    val minorityDataNeighborsCount = minorityDF.count.toInt
+
+    val rnd = uniformRDD(spark.sparkContext, samplesToAdd).map(x=>Math.floor(x * minorityDataNeighborsCount).toInt).collect()
     val collected = minorityDataNeighbors.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
-    val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(randomIndicies.map(x=>getSmoteSample(collected(x)))), dataset.schema)
+    val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(rnd.map(x=>getSmoteSample(collected(x)))), dataset.schema)
 
     createdSamples
   }
