@@ -29,7 +29,16 @@ private[ml] trait ANSModelParams extends Params with HasFeaturesCol with HasLabe
   /** @group getParam */
   final def setCMaxRatio(value: Double): this.type = set(cMaxRatio, value)
 
-  setDefault(cMaxRatio -> 0.25)
+  /**
+    * Param for kNN top tree leaf size.
+    * @group param
+    */
+  final val distanceNeighborLimit: Param[Int] = new Param[Int](this, "distanceNeighborLimit", "limit of how many distance based neighbors to keep, default=0 returns all")
+
+  /** @group getParam */
+  final def setdDstanceNeighborLimit(value: Int): this.type = set(distanceNeighborLimit, value)
+
+  setDefault(cMaxRatio -> 0.25, distanceNeighborLimit -> 0)
 }
 
 /** Transformer */
@@ -86,7 +95,7 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
-    val majorityKnnFit: KNNModel = majorityKnnModel.fit(majorityDF).setDistanceCol("distances").setMaxDistanceCol("closestPosDistance").setQueryByDistance(true)//.setK(20) // FIXME
+    val majorityKnnFit: KNNModel = majorityKnnModel.fit(majorityDF).setDistanceCol("distances").setMaxDistanceCol("closestPosDistance").setQueryByDistance(true).setDistanceNeighborLimit($(distanceNeighborLimit))
     val majorityNeighbors = majorityKnnFit.transform(firstPosNeighborDistances).withColumn("neighborFeatures", $"neighbors.features").drop("neighbors")
 
     val getRadiusNeighbors = udf((distances: mutable.WrappedArray[Double]) => {
@@ -126,7 +135,7 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
 
     val PusedSearchDistance = Pused.withColumn("searchDistance", lit(maxClosestPosDistance))
 
-    val PusedKnnFit: KNNModel = PusedKnnModel.fit(PusedSearchDistance).setDistanceCol("distances").setMaxDistanceCol("searchDistance").setQueryByDistance(true)
+    val PusedKnnFit: KNNModel = PusedKnnModel.fit(PusedSearchDistance).setDistanceCol("distances").setMaxDistanceCol("searchDistance").setQueryByDistance(true).setDistanceNeighborLimit($(distanceNeighborLimit))
     val PusedDistances = PusedKnnFit.transform(PusedSearchDistance).withColumn("neighborFeatures", $"neighbors.features")
       .drop("neighbors")
 
@@ -143,7 +152,7 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
     val syntheticExamples: Array[Array[Row]] = generatedSampleCounts.drop("closestPosDistance", "searchDistance", "distances", "neighborCount").filter("neighborCount > 0")
       .collect.map(x=>createSample(x))
 
-    val totalExamples: Array[Row] = syntheticExamples.flatMap(x => x.toSeq).take(samplesToAdd) // FIXME
+    val totalExamples: Array[Row] = syntheticExamples.flatMap(x => x.toSeq).take(samplesToAdd) // FIXME - check this - sample down to required count
 
     spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(totalExamples), dataset.schema)
   }
