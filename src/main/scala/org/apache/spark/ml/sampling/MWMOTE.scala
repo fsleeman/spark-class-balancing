@@ -1,5 +1,6 @@
 package org.apache.spark.ml.sampling
 
+import org.apache.commons.math3.random.{RandomDataGenerator, UniformRandomGenerator}
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.feature.StringIndexer
@@ -7,12 +8,16 @@ import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize}
 import org.apache.spark.ml.sampling.utils.{getCountsByClass, getMatchingClassCount}
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset}
+import org.apache.spark.mllib.random.RandomRDDs.randomVectorRDD
+import org.apache.spark.mllib.random.UniformGenerator
+
 
 import scala.collection.mutable
+import scala.util.Random
 import org.apache.spark.sql.functions._
 import org.apache.spark.ml.sampling.utils.pointDifference
 import org.apache.spark.ml.util.Identifiable
@@ -58,7 +63,25 @@ private[ml] trait MWMOTEModelParams extends Params with HasFeaturesCol with HasL
   /** @group getParam */
   final def setClusterK(value: Int): this.type = set(clusterK, value)
 
-  setDefault(k1->$(k), k2->$(k), k3->$(k), clusterK->10)
+  /**
+    * Param for kNN k-value.
+    * @group param
+    */
+  final val cMax: Param[Double] = new Param[Double](this, "cMax", "cMax value")
+
+  /** @group getParam */
+  final def setCMax(value: Double): this.type = set(cMax, value)
+
+  /**
+    * Param for kNN k-value.
+    * @group param
+    */
+  final val cfth: Param[Double] = new Param[Double](this, "cfth", "Cf_th value")
+
+  /** @group getParam */
+  final def setCfth(value: Double): this.type = set(cfth, value)
+
+  setDefault(k1->$(k), k2->$(k), k3->$(k), clusterK->10, cMax->3.0, cfth->50.0)
 }
 
 /** Transformer */
@@ -98,10 +121,12 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
         d) add example
     */
 
+    var t0 = System.nanoTime()
+
 
     /** 1 **/
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize)) // FIXME
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), df.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k1) + 1) // include self example
@@ -111,14 +136,16 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val f1: KNNModel = model.fit(df)
     val SminNN = f1.transform(Smin)
 
-
+    var t1 = System.nanoTime()
+    println("knn1 time: " + (t1 - t0) / 1e9 + "s")
     /** 2 **/
     val Sminf = SminNN.withColumn("nnMinorityCount", getMatchingClassCount($"neighbors.label", col($(labelCol)))).filter("nnMinorityCount > 0")
 
 
+    t0 = System.nanoTime()
     /** 3 **/
     val model2 = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize)) // FIXME
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), Smaj.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k2))
@@ -128,18 +155,26 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val f2: KNNModel = model2.fit(Smaj)
     val Nmaj = f2.transform(Sminf.drop("neighbors", "nnMinorityCount"))
 
+    t1 = System.nanoTime()
+    println("knn2 time: " + (t1 - t0) / 1e9 + "s")
 
     /** 4 **/
     Nmaj.printSchema()
+
+
+    t0 = System.nanoTime()
     val explodedNeighbors = Nmaj.select("neighbors").withColumn($(labelCol), $"neighbors.label")
       .withColumn($(featuresCol), $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     val Sbmaj = spark.sparkContext.parallelize(explodedNeighbors).toDF($(labelCol), $(featuresCol)).distinct()
 
+    t1 = System.nanoTime()
+    println("explode1 time: " + (t1 - t0) / 1e9 + "s")
 
     /** 5 **/
+    t0 = System.nanoTime()
     val model3 = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize)) // FIXME
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), Smin.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k3))
@@ -149,15 +184,23 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val f3: KNNModel = model3.fit(Smin)
     val Nmin = f3.transform(Sbmaj.drop("neighbors", "nnMinorityCount"))
 
+    t1 = System.nanoTime()
+    println("knn3 time: " + (t1 - t0) / 1e9 + "s")
+
 
     /** 6 **/
+    t0 = System.nanoTime()
     val explodedNeighbors2 = Nmin.select("neighbors").withColumn($(labelCol), $"neighbors.label")
       .withColumn($(featuresCol), $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     // FIXME - correct Simin creation
     val Simin = spark.sparkContext.parallelize(explodedNeighbors2).toDF($(labelCol), $(featuresCol)).distinct()
 
+    t1 = System.nanoTime()
+    println("explode2 time: " + (t1 - t0) / 1e9 + "s")
 
+
+    t0 = System.nanoTime()
     /** 7 **/
     val SbmajCollected: Array[DenseVector] = Sbmaj.select($(featuresCol)).collect().map(x=>x(0).asInstanceOf[DenseVector])
 
@@ -165,18 +208,16 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       // FIXME - these values are always set to CMAX, wrong values for CMAX and Cf_th?
       def calculateClosenessFactor(x: DenseVector, y: DenseVector, l: Int): Double ={
         val distance = pointDifference(y.toArray, x.toArray) / l.toDouble
-        val CMAX: Double = 3.0 // FIXME - make a parameter
-        val Cf_th: Double = 50.0 // FIXME - make a parameter
         // FIXME- should this be on the order of the number of features?
 
-        val numerator = if(1/distance <= Cf_th) {
+        val numerator = if(1/distance <= $(cfth)) {
           1/distance
         } else {
-          Cf_th
+          $(cfth)
         }
-        (numerator / Cf_th) * CMAX
+        (numerator / $(cfth)) * $(cMax)
       }
-      SbmajCollected.map(SbmajValue=>calculateClosenessFactor(minorityExample, SbmajValue, featureLength)).sorted
+      SbmajCollected.map(SbmajValue=>calculateClosenessFactor(minorityExample, SbmajValue, featureLength))//.sorted
     })
 
     val closenessFactors = Simin.withColumn("closeness", getClosenessFactors(Simin($(featuresCol)))) // result is majority data with minority closeness values
@@ -209,8 +250,11 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val kmeans = new KMeans().setK($(clusterK))
     val kMeansModel = kmeans.fit(Smin)
     val SiminKMeansClusters = kMeansModel.transform(selectionProbabilities)
+    t1 = System.nanoTime()
+    println("remaining time 1: " + (t1 - t0) / 1e9 + "s")
 
     SiminKMeansClusters.show
+    t0 = System.nanoTime()
 
     /* 11 */
     // Somin = Smin -- don't do it here
@@ -228,26 +272,55 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
 
     val r = new scala.util.Random()
 
-    def generateExample(): (Double, DenseVector) = {
+    def generateExample(randomNumbers: Array[Double]): (Double, DenseVector) = {
 
-      val randomIndexPoint = r.nextDouble()
+      val randomIndexPoint = randomNumbers(0)
       val selectedRow = runningTotalsCollected.filter(x=>x(4).asInstanceOf[Double]>=randomIndexPoint)(0)
 
       val label = selectedRow(0).asInstanceOf[Double]
       val features = selectedRow(1).asInstanceOf[DenseVector]
       val cluster = selectedRow(3).asInstanceOf[Int]
 
-      val randomIndex = (groupedClusters(cluster).length * r.nextDouble()).toInt
+      val randomIndex = (groupedClusters(cluster).length * randomNumbers(1)).toInt
       val randomExample = groupedClusters(cluster)(randomIndex)(1).asInstanceOf[DenseVector]
 
-      val alpha = r.nextDouble()
+      val alpha = randomNumbers(2)
       val synthetic = Array(features.toArray, randomExample.toArray).transpose.map(x=> x(0) + alpha * (x(1) - x(0)))
 
       (label, Vectors.dense(synthetic).toDense)
     }
 
-    // Perform random oversampling if the class does not have appropriate examples for the standard method
+
+    val generator = new UniformGenerator()
+
+    // val uniformGenerator: RandomDataGenerator = new UniformRandomGenerator[Double]()
+
+    /*val rnd = new Random(12345)
+    // randomVectorRDD(spark.sparkContext, new SparseStandardNormalGenerator(0.1), 100, 2, 8, rnd.nextLong)
+    val x = new randomVectorRDD(spark.sparkContext,
+      100,
+      10,
+      2,
+      new SparseStandardNormalGenerator(0.1),
+      rnd.nextLong)*/
+
     val syntheticDF = if(runningTotalsCollected.length > 0) {
+      val randomNumbers = randomVectorRDD(spark.sparkContext, generator, samplesToAdd, 3, dataset.rdd.getNumPartitions, 0)
+
+
+      val syntheticExamples = randomNumbers.map(x=>generateExample(x.toArray))
+
+      spark.createDataFrame(syntheticExamples).toDF()
+        .withColumnRenamed("_1",$(labelCol))
+        .withColumnRenamed("_2",$(featuresCol))
+    } else {
+      val r = new RandomOversample()
+      val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
+      model.transform(Smin).toDF()
+    }
+
+    // Perform random oversampling if the class does not have appropriate examples for the standard method
+    /*val syntheticDF = if(runningTotalsCollected.length > 0) {
       val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample())
 
       spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
@@ -257,7 +330,9 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
       val r = new RandomOversample()
       val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
       model.transform(Smin).toDF()
-    }
+    }*/
+    t1 = System.nanoTime()
+    println("remaining time 2: " + (t1 - t0) / 1e9 + "s")
 
     syntheticDF
   }
@@ -283,7 +358,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-     val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
+    val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
     val balancedDF: DataFrame = minorityClasses.map(x=>oversample(datasetSelected, x._1, majorityClassCount - x._2)).reduce(_ union _).union(datasetSelected.toDF()).select($(labelCol), $(featuresCol))
 
     balancedDF.show()
