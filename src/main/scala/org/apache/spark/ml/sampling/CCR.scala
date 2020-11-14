@@ -5,8 +5,8 @@ import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasInputCols, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.expressions.UserDefinedFunction
@@ -19,16 +19,21 @@ import scala.collection.mutable
 
 /** Transformer Parameters*/
 private[ml] trait CCRModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
+  /**
+    * Param for energy.
+    * @group param
+    */
+  final val energy: Param[Double] = new Param[Double](this, "energy", "energy")
 
+  /** @group getParam */
+  final def setEnergy(value: Double): this.type = set(energy, value)
+
+  setDefault(energy -> 0.64)
 }
 
 /** Transformer */
 class CCRModel private[ml](override val uid: String) extends Model[CCRModel] with CCRModelParams {
   def this() = this(Identifiable.randomUID("ccr"))
-
-  type Element = (Int, Array[Double])
-  type Element2 = (Long, Int, Array[Double])
-
 
   def getManhattanDistance(example: Array[Double], neighbor: Array[Double]): Double ={
     Array(example, neighbor).transpose.map(x=>Math.abs(x(1)-x(0))).sum
@@ -50,7 +55,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       if(distances(j) <= ri) {
         val d = pointDistance(features.toArray, majorityNeighbors(j))
         // FIXME - check line 19 in algorithm for tj usage (ask about this)
-        // FIXME - devide by zero val scale = (ri - d) / d
         val scale = if(d == 0) {
           ri
         } else {
@@ -84,7 +88,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     def setWithinValue(d: Double, r: Double): Double ={
       if(d < r) {
-        // FIXME - check this is max value could happen (added fix)
+        // FIXME - check this if max value could happen (added fix)
         Double.MaxValue
       } else {
         d
@@ -96,7 +100,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
   private val stuff: UserDefinedFunction = udf((distanceArray: mutable.WrappedArray[Double]) => {
 
     val distances = distanceArray.toArray
-    var energyBudget = 0.64
+    var energyBudget = $(energy)
     var ri = 0.0
     var deltaR = energyBudget
 
@@ -125,7 +129,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val label = row(0).toString
     val features = row(1).asInstanceOf[DenseVector].toArray
     val r = row(2).toString.toDouble
-    val examplesToAdd = Math.ceil(row(3).toString.toDouble).toInt // FIXME - check this
+    val examplesToAdd = Math.ceil(row(3).toString.toDouble).toInt
 
     val random = scala.util.Random
     (0 until examplesToAdd).map(_=>Row(0L, label, Vectors.dense(for(f <- features) yield f * (random.nextDouble() * 2.0 - 1) * r))).toArray
@@ -137,8 +141,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
   }
 
   private def oversample(dataset: DataFrame, minorityClassLabel: Double, samplesToAdd: Int): DataFrame ={
-    // parameters
-    // proportion = 1.0, energy = 1.0, scaling = 0.0 // FIXME - add parameters
+
     val spark = dataset.sparkSession
     import spark.implicits._
 
@@ -147,7 +150,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     /// FIXME - switch to distance?
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), majorityDF.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -159,16 +162,15 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     val minorityDataNeighbors = fitModel.transform(minorityDF)
 
-    val test = minorityDataNeighbors.withColumn("majorityIndex", $"neighbors.index")
+    val minorityDataNeighborsReshaped: Array[Row] = minorityDataNeighbors.withColumn("majorityIndex", $"neighbors.index")
       .withColumn("majorityLabel", $"neighbors.label")
       .withColumn("majorityPoints", $"neighbors.features").drop("neighbors").collect()
 
-    // FIXME - index changed from Long to Int after kNN
-    val foo = test.map(x=>x.toSeq).map(x=>(x(0).toString.toLong, x(1).toString, x(2).asInstanceOf[DenseVector],
+    val minorityDataNeighborsArray = minorityDataNeighborsReshaped.map(x=>x.toSeq).map(x=>(x(0).toString.toLong, x(1).toString, x(2).asInstanceOf[DenseVector],
       x(3).asInstanceOf[mutable.WrappedArray[Double]], x(4).asInstanceOf[mutable.WrappedArray[Long]],
       x(5).asInstanceOf[mutable.WrappedArray[Double]], x(6).asInstanceOf[mutable.WrappedArray[DenseVector]]))
-    val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
-    val testDF = bar.withColumnRenamed("_1", "index")
+    val minorityDataNeighborsDF = spark.createDataFrame(spark.sparkContext.parallelize(minorityDataNeighborsArray))
+      .withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", $(labelCol))
       .withColumnRenamed("_3", $(featuresCol))
       .withColumnRenamed("_4", "distances")
@@ -176,10 +178,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       .withColumnRenamed("_6", "majorityLabel")
       .withColumnRenamed("_7", "majorityFeatures")
 
-    testDF.show
-    testDF.printSchema()
-
-    val result = testDF.withColumn("ri", stuff($"distances"))
+    val result = minorityDataNeighborsDF.withColumn("ri", stuff($"distances"))
     result.show
 
     val invertRi: UserDefinedFunction = udf((ri: Double) => {
@@ -225,12 +224,12 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val averaged: Array[Row] = grouped.map(x=>getAveragedRow(x._2)).toArray
     val movedMajorityIndicies = averaged.map(x=>x(0).toString.toLong).toList
 
-    val movedMajorityExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(averaged.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF() // x(2).asInstanceOf[Array[Double]])))).toDF()
+    val movedMajorityExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(averaged.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF()
       .withColumnRenamed("_1","index")
       .withColumnRenamed("_2",$(labelCol))
       .withColumnRenamed("_3",$(featuresCol))
 
-    val syntheticExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(unionedPoints.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF() // x(2).asInstanceOf[Array[Double]])))).toDF()
+    val syntheticExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(unionedPoints.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF()
       .withColumnRenamed("_1","index")
       .withColumnRenamed("_2",$(labelCol))
       .withColumnRenamed("_3",$(featuresCol))
