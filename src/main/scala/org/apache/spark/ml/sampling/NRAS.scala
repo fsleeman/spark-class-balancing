@@ -2,7 +2,7 @@ package org.apache.spark.ml.sampling
 
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, lit, udf}
@@ -13,14 +13,23 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import utils.getMatchingClassCount
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 
 import scala.collection.mutable
 import scala.util.Random
 
 /** Transformer Parameters*/
 private[ml] trait NRASModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
+  /**
+    * Param for threshold
+    * @group param
+    */
+  final val threshold: Param[Int] = new Param[Int](this, "threshold", "threshold")
 
+  /** @group getParam */
+  final def setThreshold(value: Int): this.type = set(threshold, value)
+
+  setDefault(threshold -> 3)
 }
 
 /** Transformer */
@@ -34,8 +43,8 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
     val neighbors = row(2).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail
     val randomNeighbor: Array[Double] = neighbors(Random.nextInt(neighbors.length)).toArray
 
-    val gap = randomNeighbor.indices.map(_=>Random.nextDouble()).toArray // FIXME - should this be one value instead?
-    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, gap).transpose.map(x=>x(0) + x(2) * (x(1)-x(0)))).toDense
+    val gap = Random.nextDouble()
+    val syntheticExample = Vectors.dense(Array(features, randomNeighbor).transpose.map(x=>x(0) + (x(1) - x(0)) * gap)).toDense
 
     Row(label, syntheticExample)
   }
@@ -71,7 +80,7 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
     updated.show
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize))
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), propensity.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -82,15 +91,11 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
 
     val minorityDF = propensity.filter(propensity($(labelCol)) === minorityClassLabel)
     val minorityKnn = f.transform(minorityDF)
-    minorityKnn.show
 
-    val threshold = 3 // FIXME - make parameter
     val neighborCounts = minorityKnn.withColumn("sameClassNeighbors", getMatchingClassCount(minorityKnn("neighbors.label"), minorityKnn($(labelCol))))
-    val neighborClassFiltered = neighborCounts.filter(neighborCounts("sameClassNeighbors") >= threshold)
+    val neighborClassFiltered = neighborCounts.filter(neighborCounts("sameClassNeighbors") >= $(threshold))
 
-    neighborClassFiltered.show
-
-    // Check is filtered data is empty // FIXME
+    // Check if filtered data is empty
     val dataForSmote1 = if(neighborClassFiltered.count() > 0) {
       neighborClassFiltered
     } else {

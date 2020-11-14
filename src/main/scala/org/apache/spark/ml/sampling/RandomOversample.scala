@@ -16,12 +16,13 @@ import org.apache.spark.sql.functions.{desc, udf}
 
 /** Transformer Parameters*/
 private[ml] trait RandomOversampleModelParams extends Params with HasFeaturesCol with HasLabelCol with ClassBalancingRatios {
-  final val singleClassOversamplingSize: Param[Int] = new Param[Int](this, "singleClassOversampling", "samples to add for single class case")
 
-  setDefault(singleClassOversamplingSize, 0)
+  final val singleClassOversamplingSize: Param[Int] = new Param[Int](this, "singleClassOversampling", "samples to add for single class case")
 
   /** @group getParam */
   final def setSingleClassOversampling(value: Int): this.type = set(singleClassOversamplingSize, value)
+
+  setDefault(singleClassOversamplingSize, 0)
 }
 
 /** Transformer */
@@ -29,9 +30,8 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
   def this() = this(Identifiable.randomUID("randomOversample"))
 
   def oversample(df: DataFrame, numSamples: Int): DataFrame = {
-    var samples = Array[Row]() //FIXME - make this more parallel
+    var samples = Array[Row]()
     val spark = df.sparkSession
-    //FIXME - some could be zero if split is too small
 
     val currentCount = df.count()
     if (0 < currentCount) {
@@ -42,7 +42,6 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
     spark.sqlContext.createDataFrame(spark.sparkContext.parallelize(samples), df.schema)
   }
 
-  // FIXME
   private def getSamplesToAdd(label: Double, sampleCount: Long, majorityClassCount: Int, samplingRatios: Map[Double, Double]): Int ={
     if(samplingRatios contains label) {
       val ratio = samplingRatios(label)
@@ -56,9 +55,7 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
     }
   }
 
-
   override def transform(dataset: Dataset[_]): DataFrame = {
-    // FIXME - skip indexer for single class?
     val indexer = new StringIndexer()
       .setInputCol($(labelCol))
       .setOutputCol("labelIndexed")
@@ -94,7 +91,6 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
       .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }
 
-
   override def transformSchema(schema: StructType): StructType = {
     schema
   }
@@ -103,9 +99,7 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
     val copied = new RandomOversampleModel(uid)
     copyValues(copied, extra).setParent(parent)
   }
-
 }
-
 
 /** Estimator Parameters*/
 private[ml] trait RandomOversampleParams extends RandomOversampleModelParams with HasSeed {

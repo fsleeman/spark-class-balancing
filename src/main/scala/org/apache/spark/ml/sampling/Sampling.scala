@@ -208,7 +208,13 @@ object Sampling {
     else { 3 }
   }
 
-  def getSparkNNMinorityResult(x: mutable.WrappedArray[Any], index: Int, features: Any): (Int, Int, Int, mutable.WrappedArray[Double]) = {
+  def filterByMinorityType(df: DataFrame, minorityLabels: String): DataFrame ={
+    val minorityType = Map("S" -> 0, "B" -> 1, "R" -> 2, "O" -> 3)
+    val numberValues = minorityLabels.split("").map(x=>minorityType(x))
+    df.filter(df("minorityType").isin(numberValues:_*)).select("index", "label", "features")
+  }
+
+  /*def getSparkNNMinorityResult(x: mutable.WrappedArray[Any], index: Int, features: Any): (Int, Int, Int, mutable.WrappedArray[Double]) = {
     val wrappedArray = x
 
     val nearestLabels = Array[Int]()
@@ -229,15 +235,8 @@ object Sampling {
     (index, currentLabel, getMinorityClassLabel(currentCount), currentArray)//features.toString().asInstanceOf[mutable.WrappedArray[Double]])
   }
 
-
-  def filterByMinorityType(df: DataFrame, minorityLabels: String): DataFrame ={
-    val minorityType = Map("S" -> 0, "B" -> 1, "R" -> 2, "O" -> 3)
-    val numberValues = minorityLabels.split("").map(x=>minorityType(x))
-    df.filter(df("minorityType").isin(numberValues:_*)).select("index", "label", "features")
-  }
-
-  def getInstanceLevelDifficulty(df: DataFrame): DataFrame ={
-    val path = "/tmp/covtypeDF/"
+  def getInstanceLevelDifficulty(df: DataFrame, dataFile: String): DataFrame ={
+    val path = "/home/ford/data/mt/" + dataFile + "DF"
 
     val minorityDF = try {
         println("READ KNN")
@@ -295,13 +294,125 @@ object Sampling {
     }
 
     minorityDF
+  }*/
+
+
+  def getSparkNNMinorityResult(neighborLabels: mutable.WrappedArray[String], index: Long, features: DenseVector): (Long, String, Int, DenseVector) = {
+
+    val currentLabel = neighborLabels.array.head
+    val nearestLabels = neighborLabels.array.tail
+
+    var currentCount = 0
+    for(i<-nearestLabels.indices) {
+      if (currentLabel == nearestLabels(i)) {
+        currentCount += 1
+      }
+    }
+    // val currentArray = features.toString.substring(1, features.toString.length-1).split(",").map(x=>x.toDouble)
+    (index, currentLabel, getMinorityClassLabel(currentCount), features)//features.toString().asInstanceOf[mutable.WrappedArray[Double]])
+  }
+
+  def getInstanceLevelDifficulty(df: DataFrame, dataFile: String, minorityTypePath: String): DataFrame ={
+    val path = minorityTypePath + "/" + dataFile + "DF"
+
+    val minorityDF = try {
+      println("READ KNN")
+      val readData = df.sparkSession.read.
+        option("inferSchema", true).
+        option("header", true).
+        csv(path)
+
+      val stringToArray = udf((item: String)=>{
+        val features: Array[Double] = item.dropRight(1).drop(1).split(",").map(x=>x.toDouble)
+        Vectors.dense(features).toDense
+      })
+
+      val intToLong = udf((index: Int)=>{
+        index.toLong
+      })
+
+      readData.withColumn("features", stringToArray(col("features"))).withColumn("index", intToLong(col("index")))
+    } catch {
+      case _: Throwable => {
+        val spark = df.sparkSession
+        import spark.implicits._
+
+        val t0 = System.nanoTime()
+        println("CALCULATE KNN")
+        val leafSize = 1000
+        val knn = new KNN()
+          .setTopTreeSize(df.count.toInt / 10)
+          .setTopTreeLeafSize(leafSize)
+          .setSubTreeLeafSize(2500)
+          .setSeed(42L)
+          .setAuxCols(Array("label", "features"))
+        val model = knn.fit(df).setK(5 + 1)
+        val results2: DataFrame = model.transform(df)
+        println("at results2")
+        results2.printSchema()
+
+        val collected: Array[Row] = results2.withColumn("neighborLabels", $"neighbors.label").select( "neighborLabels", "index", "features").collect()
+        val minorityValueDF: Array[(Long, String, Int, DenseVector)] = collected.map(x=>(x(0).asInstanceOf[mutable.WrappedArray[String]], x(1).asInstanceOf[Long], x(2).asInstanceOf[DenseVector])).map(x=>getSparkNNMinorityResult(x._1, x._2.toString.toInt, x._3))
+
+
+        val minorityDF = df.sparkSession.createDataFrame(df.sparkSession.sparkContext.parallelize(minorityValueDF))
+          .withColumnRenamed("_1","index")
+          .withColumnRenamed("_2","label")
+          .withColumnRenamed("_3","minorityType")
+          .withColumnRenamed("_4","features").sort("index")
+
+        println("***** schema")
+        minorityDF.printSchema()
+
+
+        //val stringify = udf((vs: Seq[String]) => s"""[${vs.mkString(",")}]""")
+        val stringify = udf((v: DenseVector) => {
+          v.toString
+        })
+
+        //val xx = minorityDF.withColumn("features", stringify(col("features")))
+        //println("XX")
+        //xx.show()
+        //xx.printSchema()
+
+
+        minorityDF.withColumn("features", stringify(col("features"))).
+          repartition(1).
+          write.format("com.databricks.spark.csv").
+          option("header", "true").
+          mode("overwrite").
+          save(path)
+        val t1 = System.nanoTime()
+        println("Elapsed time: " + (t1 - t0) / 1e9 + "s")
+        // FIXME - save minority type buld time
+
+        println("READ KNN")
+        val readData = df.sparkSession.read.
+          option("inferSchema", true).
+          option("header", true).
+          csv(path)
+
+        val stringToArray = udf((item: String)=>{
+          val features: Array[Double] = item.dropRight(1).drop(1).split(",").map(x=>x.toDouble)
+          Vectors.dense(features).toDense
+        })
+
+        val intToLong = udf((index: Int)=>{
+          index.toLong
+        })
+
+        readData.withColumn("features", stringToArray(col("features"))).withColumn("index", intToLong(col("index")))
+      }
+    }
+
+    minorityDF
   }
 
 
 
   def main(args: Array[String]) {
 
-    val filename = "/home/ford/data/sampling_input.txt"
+    val filename = args(0)// "/home/ford/data/sampling_input.txt"
     val lines = Source.fromFile(filename).getLines.map(x=>x.split(":")(0)->x.split(":")(1)).toMap
     val input_file = lines("dataset").trim
     val classifier = lines("classifier").trim
@@ -309,6 +420,7 @@ object Sampling {
     val labelColumnName = lines("labelColumn").trim
     val enableDataScaling = if(lines("enableScaling").trim == "true") true else false
     val numSplits = lines("numCrossValidationSplits").trim.toInt
+    val minorityTypePath = lines("minorityTypePath").trim
     val savePath = lines("savePath").trim
 
     println("input")
@@ -366,8 +478,9 @@ object Sampling {
     } else { converted }.cache()
 
 
-
-    val instanceLevelDF = getInstanceLevelDifficulty(scaledDataIn)
+    val dataFile = input_file.split("/").reverse.head
+    println("***** file : " + dataFile.substring(0, dataFile.length-4))
+    val instanceLevelDF = getInstanceLevelDifficulty(scaledDataIn, dataFile.substring(0, dataFile.length-4), minorityTypePath)
     println("@@@@")
     instanceLevelDF.show()
 
@@ -477,11 +590,11 @@ object Sampling {
            val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)
            model.transform(trainData)
          } else if(samplingMethod == "ccr") {
-           val r = new CCR()
+           val r = new CCR().setEnergy(1.0)
            val model = r.fit(trainData).setBalanceThreshold(0.0)// .setTopTreeSize(10)
            model.transform(trainData)
          } else if(samplingMethod == "ans") {
-           val r = new ANS()
+           val r = new ANS().setdDstanceNeighborLimit(100)
            val model = r.fit(trainData).setBalanceThreshold(0.0)
            model.transform(trainData)
          } else if(samplingMethod == "clusterSmote") {

@@ -43,17 +43,15 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val row = knnClusters(clusterId)(Random.nextInt(knnClusterCounts(clusterId)))
     val features = row(1).asInstanceOf[mutable.WrappedArray[DenseVector]]
     val aSample = features(0).toArray
-    val bSample = features(Random.nextInt(Math.min($(k) + 1, features.length))).toArray // FIXME - check
+    val bSample = features(Random.nextInt($(k)) + 1).toArray
     val offset = Random.nextDouble()
 
-    /// FIXME - check ALL distance calculations
     Vectors.dense(Array(aSample, bSample).transpose.map(x=>x(0) + offset * (x(1)-x(0)))).toDense
   }
 
   def calculateKnnByCluster(spark: SparkSession, df: DataFrame): DataFrame ={
     import spark.implicits._
 
-    // FIXME - why twice?
     val model = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), df.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
@@ -62,6 +60,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
+    // FIXME - pick solution for buffer issues
     if(model.getBufferSize < 0.0) {
       val model = new KNN().setFeaturesCol($(featuresCol))
         .setTopTreeSize(calculateToTreeSize($(topTreeSize), df.count()))

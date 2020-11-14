@@ -30,15 +30,13 @@ private[ml] trait SMOTEDModelParams extends Params with HasFeaturesCol with HasL
 class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDModel] with SMOTEDModelParams {
   def this() = this(Identifiable.randomUID("smoteD"))
 
-  val knnK = 5 // FIXME - make parameter
-
   private val calculateDistances: UserDefinedFunction = udf((neighbors: scala.collection.mutable.WrappedArray[DenseVector]) => {
     (1 until neighbors.length).map(x=>pointDifference(neighbors(0).toArray, neighbors(x).toArray))
   })
 
   private val calculateStd: UserDefinedFunction = udf((distances: scala.collection.mutable.WrappedArray[Double]) => {
     val mean = distances.sum / distances.length.toDouble
-    Math.sqrt(distances.map(x=>Math.pow(x - mean,2)).sum * (1 / (distances.length - 1).toDouble)) /// FIXME - check formula
+    Math.sqrt(distances.map(x=>Math.pow(x - mean,2)).sum * (1 / (distances.length - 1).toDouble))
   })
 
   private val calculateLocalDistanceWeights: UserDefinedFunction = udf((distances: scala.collection.mutable.WrappedArray[Double]) => {
@@ -51,9 +49,7 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     val counts = distances.map(x=>((x/ distances.sum) * numberToAdd).toInt + 1).reverse
 
     val originalExample = neighbors.head.toArray
-    val reverseNeighbors = neighbors.tail.reverse.map(x=>x.toArray) // furtherest first
-
-    // FIXME - only samples upto the required count
+    val reverseNeighbors = neighbors.tail.reverse.map(x=>x.toArray) // furthest first
 
     def addOffset(x: Array[Double], distanceLine: Array[Double], offset: Double): Array[Double] = {
       Array[Array[Double]](x, distanceLine).transpose.map(x=>x(0) + x(1)*offset)
@@ -101,7 +97,7 @@ class SMOTEDModel private[ml](override val uid: String) extends Model[SMOTEDMode
     val partitionWindow = Window.partitionBy(col($(labelCol))).orderBy($"samplesToAdd".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     val sumTest = sum($"samplesToAdd").over(partitionWindow)
     val runningTotals = sortDF.select($"*", sumTest as "running_total")
-    val filteredTotals = runningTotals.filter(runningTotals("running_total") <= samplesToAdd) // FIXME - use take if less then amount
+    val filteredTotals = runningTotals.filter(runningTotals("running_total") <= samplesToAdd)
 
     val addedSamples: Array[Array[Array[Double]]] = filteredTotals.collect.map(x=>sampleExistingExample(x(7).asInstanceOf[Int], x(3).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     val collectedSamples = addedSamples.reduce(_ union _).map(x=>Vectors.dense(x).toDense).map(x=>Row(minorityClassLabel, x))

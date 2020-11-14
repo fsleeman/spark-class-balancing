@@ -5,8 +5,8 @@ import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
@@ -19,7 +19,16 @@ import org.apache.spark.sql.types.StructType
 
 /** Transformer Parameters*/
 private[ml] trait BorderlineSMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
+  /**
+    * Param for method
+    * @group param
+    */
+  final val method: Param[Int] = new Param[Int](this, "mode", "Borderline SMOTE method, 1 - multi-class, 2 - binary only")
 
+  /** @group getParam */
+  final def setMethod(value: Int): this.type = set(method, value)
+
+  setDefault(method -> 1)
 }
 
 /** Transformer */
@@ -32,7 +41,6 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
     val currentClass = nearestClasses(0)
     val majorityNeighbors = nearestClasses.tail.map(x => if (x == currentClass) 0 else 1).sum
     val numberOfNeighbors = nearestClasses.length - 1
-    println(majorityNeighbors + " " + numberOfNeighbors + " " + neighbors)
     if (numberOfNeighbors / 2 <= majorityNeighbors && majorityNeighbors < numberOfNeighbors) {
       true
     } else {
@@ -62,7 +70,7 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
     val minorityDF = dataset.filter(dataset($(labelCol))===minorityClassLabel)
 
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count())) // FIXME - do in all places
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -76,9 +84,11 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
     // Find DANGER examples: if m'=m (noise), m/2 < m' < m (DANGER), 0 <= m' <= m/2 (safe)
 
     val dfDanger = nearestNeighborDF.filter(isDanger(nearestNeighborDF("neighbors.label")))
-
-    // FIXME - add a divide by zero check
-    val s = (samplesToAdd / dfDanger.count.toDouble).ceil.toInt
+    val s = if(dfDanger.count == 0) {
+      0
+    } else {
+      (samplesToAdd / dfDanger.count.toDouble).ceil.toInt
+    }
 
     // step 3
     // For all DANGER examples, find k nearest examples from minority class
@@ -105,12 +115,11 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
     val minorityNeighborFeatures: DataFrame = minorityNearestNeighborDF.select($"neighbors.features")
     val result: Array[Array[Row]] = minorityNeighborFeatures.collect
       .map(row=>generateSamples(row.getValuesMap[Any](row.schema.fieldNames)($(featuresCol))
-        .asInstanceOf[mutable.WrappedArray[DenseVector]], s, 1.0, minorityClassLabel)) //FIXME - range parameter
+        .asInstanceOf[mutable.WrappedArray[DenseVector]], s, 1.0, minorityClassLabel))
 
     // mode = 1: borderlineSMOTE1: use minority NNs
     // mode = 2: borderlineSMOTE2: use minority NNs AND majority NNs
-    val mode = 1 // FIXME - add parameter
-    val oversamplingRows: Array[Row] = if(mode == 1) { // FIXME - don't use mode 2, only works directly with binary case
+    val oversamplingRows: Array[Row] = if($(method) == 1) {
       val r = scala.util.Random
       r.shuffle(result.flatMap(x => x.toSeq).toList).take(samplesToAdd).toArray
     }
@@ -131,7 +140,7 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
       val nearestNegativeExamples: DataFrame = tNegative.select($"neighbors.features")
       val nearestNegativeSamples: Array[Array[Row]] = nearestNegativeExamples.collect
         .map(row=>generateSamples(row.getValuesMap[Any](row.schema.fieldNames)($(featuresCol))
-          .asInstanceOf[mutable.WrappedArray[DenseVector]], s, 0.5, minorityClassLabel)) //FIXME - range parameter
+          .asInstanceOf[mutable.WrappedArray[DenseVector]], s, 0.5, minorityClassLabel))
       val nearestNegativeRows: Array[Row] = nearestNegativeSamples.flatMap(x=>x.toSeq)
 
       result.flatMap(x => x.toSeq) ++ nearestNegativeRows

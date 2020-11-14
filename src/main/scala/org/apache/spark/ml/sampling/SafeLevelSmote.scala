@@ -5,8 +5,8 @@ import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
-import org.apache.spark.ml.param.{ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd}
+import org.apache.spark.ml.param.{Param, ParamMap, Params}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.functions.{desc, udf}
@@ -20,12 +20,21 @@ import org.apache.spark.sql.types.StructType
 
 /** Transformer Parameters*/
 private[ml] trait SafeLevelSMOTEModelParams extends Params with HasFeaturesCol with HasLabelCol with UsingKNN with ClassBalancingRatios {
+  /**
+    * Param for kNN k-value.
+    * @group param
+    */
+  final val samplingCorrectionRate: Param[Double] = new Param[Double](this, "samplingCorrectionRate", "proportion of over/undersampling to allow")
 
+  /** @group getParam */
+  final def setClusterK(value: Double): this.type = set(samplingCorrectionRate, value)
+
+  setDefault(samplingCorrectionRate -> 0.05)
 }
 
 /** Transformer */
 class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[SafeLevelSMOTEModel] with SafeLevelSMOTEModelParams {
-  def this() = this(Identifiable.randomUID("classBalancer"))
+  def this() = this(Identifiable.randomUID("safeLevel"))
 
   private val getSafeNeighborCount = udf((array: mutable.WrappedArray[Double], minorityClassLabel: Double) => {
     def isMajorityNeighbor(x1: Double, x2: Double): Int = {
@@ -76,9 +85,8 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
     val spark = dataset.sparkSession
     import spark.implicits._
 
-    // FIXME - move to transform function
     val model = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize)) // FIXME
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -92,7 +100,7 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
       getSafeNeighborCount($"neighbors.label", $"label")).drop("neighbors")
 
     val model2 = new KNN().setFeaturesCol($(featuresCol))
-      .setTopTreeSize($(topTreeSize)) // FIXME
+      .setTopTreeSize(calculateToTreeSize($(topTreeSize), dataset.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
       .setK($(k) + 1) // include self example
@@ -112,7 +120,7 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
     val minorityFilteredDF = minorityDF.filter(minorityNearestNeighbor("pClassCount")=!=0)
 
     if(minorityFilteredDF.count() > 0) {
-      val minorityRatiosDF = minorityFilteredDF.withColumn("ratios", getRatios($"pClassCount", $"neighbors.pClassCount")).withColumn("neighborsFeatures", $"neighbors.features")  //getRatios($"pClassCount", $"neighbors.pClassCount"))
+      val minorityRatiosDF = minorityFilteredDF.withColumn("ratios", getRatios($"pClassCount", $"neighbors.pClassCount")).withColumn("neighborsFeatures", $"neighbors.features")
       val samplingRate = Math.ceil(samplesToAdd / minorityRatiosDF.count.toDouble).toInt
 
       val syntheticExamples: Array[Row] = minorityRatiosDF.collect().map(x=>generateExamples(x(0).asInstanceOf[Double],
@@ -121,10 +129,9 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
 
       val result = spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples), datasetSchema)
 
-      // FIXME - check this
-      if(syntheticExamples.length * 1.1 > samplesToAdd) {
+      if(syntheticExamples.length * (1.0 + $(samplingCorrectionRate)) > samplesToAdd) {
         result.sample(withReplacement=false, samplesToAdd.toDouble/syntheticExamples.length.toDouble)
-      } else if(syntheticExamples.length * 1.1 < samplesToAdd){
+      } else if(syntheticExamples.length * (1.0 + $(samplingCorrectionRate)) < samplesToAdd){
         result.sample(withReplacement=true, samplesToAdd.toDouble/syntheticExamples.length.toDouble)
       } else {
         result
@@ -195,7 +202,7 @@ private[ml] trait SafeLevelSMOTEParams extends SafeLevelSMOTEModelParams with Ha
 
 /** Estimator */
 class SafeLevelSMOTE(override val uid: String) extends Estimator[SafeLevelSMOTEModel] with SafeLevelSMOTEParams {
-  def this() = this(Identifiable.randomUID("sampling"))
+  def this() = this(Identifiable.randomUID("safeLevel"))
 
   override def fit(dataset: Dataset[_]): SafeLevelSMOTEModel = {
     val model = new SafeLevelSMOTEModel(uid).setParent(this)

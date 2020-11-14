@@ -58,12 +58,9 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     val neighbors = row(2).asInstanceOf[mutable.WrappedArray[DenseVector]].toArray.tail // skip the self neighbor
     val randomNeighbor = neighbors(Random.nextInt(neighbors.length)).toArray
 
-    val randmPoint = Random.nextDouble()
-    val gap = features.indices.map(x => (randomNeighbor(x) - features(x)) * randmPoint).toArray
-
-    // FIXME - ask if this should be multi-dimensional?
-    val ranges = features.indices.map(x => getGaussian(gap(x), $(sigma))).toArray
-    val syntheticExample = Vectors.dense(Array(features, randomNeighbor, ranges).transpose.map(x => x(0) + (x(1) - x(0) * x(2)))).toDense // FIXME - check formula form paper
+    val mean = Random.nextDouble()
+    val range = getGaussian(mean, $(sigma))
+    val syntheticExample = Vectors.dense(Array(features, randomNeighbor).transpose.map(x => x(0) + (x(1) - x(0)) * range)).toDense
 
     Row(label, syntheticExample)
   }

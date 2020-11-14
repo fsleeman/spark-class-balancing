@@ -116,18 +116,13 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     val minorityExamples = minorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)
     val majorityExamples = majorityDF.select($(featuresCol)).collect.map(x=>x(0).asInstanceOf[DenseVector].toArray)
 
-    //val minoritySampleSize = Math.min(1000/minorityExamples.size.toDouble, 1.0)
-    //val majoritySampleSize = Math.min(1000/majorityExamples.size.toDouble, 1.0)
-
-
     val addedPoints = (0 until samplesToAdd).map(_=>createExample(spark, majorityExamples,
       minorityExamples, $(gamma), $(stepSize), $(iterations), $(stoppingProbability)))
 
-    val foo: Array[(Double, DenseVector)] = addedPoints.map(x=>(minorityClassLabel, x)).toArray
-    val bar = spark.createDataFrame(spark.sparkContext.parallelize(foo))
-    val bar2 = bar.withColumnRenamed("_2", "label")
+    val sampledArray: Array[(Double, DenseVector)] = addedPoints.map(x=>(minorityClassLabel, x)).toArray
+    val sampledDF = spark.createDataFrame(spark.sparkContext.parallelize(sampledArray))
+    sampledDF.withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
-    bar2
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {

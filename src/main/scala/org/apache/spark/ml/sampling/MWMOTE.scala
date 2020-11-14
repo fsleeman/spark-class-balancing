@@ -121,8 +121,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
         d) add example
     */
 
-    var t0 = System.nanoTime()
-
 
     /** 1 **/
     val model = new KNN().setFeaturesCol($(featuresCol))
@@ -136,13 +134,10 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val f1: KNNModel = model.fit(df)
     val SminNN = f1.transform(Smin)
 
-    var t1 = System.nanoTime()
-    println("knn1 time: " + (t1 - t0) / 1e9 + "s")
     /** 2 **/
     val Sminf = SminNN.withColumn("nnMinorityCount", getMatchingClassCount($"neighbors.label", col($(labelCol)))).filter("nnMinorityCount > 0")
 
 
-    t0 = System.nanoTime()
     /** 3 **/
     val model2 = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), Smaj.count()))
@@ -155,24 +150,14 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val f2: KNNModel = model2.fit(Smaj)
     val Nmaj = f2.transform(Sminf.drop("neighbors", "nnMinorityCount"))
 
-    t1 = System.nanoTime()
-    println("knn2 time: " + (t1 - t0) / 1e9 + "s")
-
     /** 4 **/
-    Nmaj.printSchema()
-
-
-    t0 = System.nanoTime()
     val explodedNeighbors = Nmaj.select("neighbors").withColumn($(labelCol), $"neighbors.label")
       .withColumn($(featuresCol), $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     val Sbmaj = spark.sparkContext.parallelize(explodedNeighbors).toDF($(labelCol), $(featuresCol)).distinct()
 
-    t1 = System.nanoTime()
-    println("explode1 time: " + (t1 - t0) / 1e9 + "s")
 
     /** 5 **/
-    t0 = System.nanoTime()
     val model3 = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), Smin.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
@@ -184,30 +169,19 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val f3: KNNModel = model3.fit(Smin)
     val Nmin = f3.transform(Sbmaj.drop("neighbors", "nnMinorityCount"))
 
-    t1 = System.nanoTime()
-    println("knn3 time: " + (t1 - t0) / 1e9 + "s")
-
 
     /** 6 **/
-    t0 = System.nanoTime()
     val explodedNeighbors2 = Nmin.select("neighbors").withColumn($(labelCol), $"neighbors.label")
       .withColumn($(featuresCol), $"neighbors.features")
       .collect.flatMap(x=>explodeNeighbors(x(1).asInstanceOf[mutable.WrappedArray[Double]], x(2).asInstanceOf[mutable.WrappedArray[DenseVector]]))
     // FIXME - correct Simin creation
     val Simin = spark.sparkContext.parallelize(explodedNeighbors2).toDF($(labelCol), $(featuresCol)).distinct()
 
-    t1 = System.nanoTime()
-    println("explode2 time: " + (t1 - t0) / 1e9 + "s")
 
-
-    t0 = System.nanoTime()
     /** 7 **/
-
-    var t0x = System.nanoTime()
     val SbmajCollected: Array[DenseVector] = Sbmaj.select($(featuresCol)).collect().map(x=>x(0).asInstanceOf[DenseVector])
 
     val getClosenessFactors = udf((minorityExample: DenseVector) => {
-      // FIXME - these values are always set to CMAX, wrong values for CMAX and Cf_th?
       def calculateClosenessFactor(x: DenseVector, y: DenseVector, l: Int): Double ={
         val distance = pointDifference(y.toArray, x.toArray) / l.toDouble
         // FIXME- should this be on the order of the number of features?
@@ -228,59 +202,34 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     })
 
     val informationWeights = closenessFactors.withColumn("informationWeights", calculateInformationWeights(closenessFactors("closeness")))
-    var t1x = System.nanoTime()
-    println("7 time: " + (t1x - t0x) / 1e9 + "s")
 
 
-
-    /* 8 */ // FIXME - wrong
-    t0x = System.nanoTime()
-
+    /* 8 */
     val calculateSelectionWeights = udf((informationWeights: mutable.WrappedArray[Double]) => {
       informationWeights.toArray.sum
     })
     val selectionWeights = informationWeights.withColumn("selectionWeights", calculateSelectionWeights(informationWeights("informationWeights")))
-    selectionWeights.show
-    t1x = System.nanoTime()
-    println("8 time: " + (t1x - t0x) / 1e9 + "s")
+
+
     /* 9 */
-    t0x = System.nanoTime()
-    println("9 size: " + selectionWeights.count())
     val selectionWeightSum = selectionWeights.select("selectionWeights").collect().map(x=>x(0).asInstanceOf[Double]).sum
 
     val calculateSelectionProbabilities = udf((selectionWeight: Double) => {
       selectionWeight / selectionWeightSum
     })
     val selectionProbabilities = selectionWeights.withColumn("selectionProbabilities", calculateSelectionProbabilities(selectionWeights("selectionWeights")))
-    selectionProbabilities.show
 
-    t1x = System.nanoTime()
-    println("9 time: " + (t1x - t0x) / 1e9 + "s")
+
     /* 10 */
-    t0x = System.nanoTime()
-
     val kmeans = new KMeans().setK($(clusterK))
     val kMeansModel = kmeans.fit(Smin)
     val SiminKMeansClusters = kMeansModel.transform(selectionProbabilities)
-    t1 = System.nanoTime()
-    println("remaining time 1: " + (t1 - t0) / 1e9 + "s")
-
-    SiminKMeansClusters.show
-
-    t1x = System.nanoTime()
-    println("10 time: " + (t1x - t0x) / 1e9 + "s")
-
-    t0 = System.nanoTime()
 
     /* 11 */
     // Somin = Smin -- don't do it here
 
 
     /* 12 */
-    t0x = System.nanoTime()
-
-    // FIXME - set proportional weights like before instead of window method
-
 
     val SiminClustersCollected = SiminKMeansClusters.select($(labelCol), $(featuresCol), "selectionProbabilities", "prediction")
 
@@ -290,122 +239,38 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val runningTotalsCollected = runningTotals.collect()
     val groupedClusters = (0 until $(clusterK)).map(x=>runningTotalsCollected.filter(_(3)==x))
 
-    val r = new scala.util.Random()
-
-    // random
     def generateExample(randomNumbers: Array[Double]): (Double, DenseVector) = {
+
       val randomIndexPoint = randomNumbers(0)
-      val selectedRow = runningTotalsCollected.filter(x => x(4).asInstanceOf[Double] >= randomIndexPoint)(0)
-
-      val label = selectedRow(0).asInstanceOf[Double]
-      val features = selectedRow(1).asInstanceOf[DenseVector]
-      val cluster = selectedRow(3).asInstanceOf[Int]
-
-      val randomIndex = (groupedClusters(cluster).length * randomNumbers(1)).toInt
-      val randomExample = groupedClusters(cluster)(randomIndex)(1).asInstanceOf[DenseVector]
-
-      val alpha = randomNumbers(2)
-      val synthetic = Array(features.toArray, randomExample.toArray).transpose.map(x => x(0) + alpha * (x(1) - x(0)))
-
-      (label, Vectors.dense(synthetic).toDense)
-    }
-
-    val generator = new UniformGenerator()
-
-    val syntheticDF = if(runningTotalsCollected.length > 0) {
-      val randomNumbers = randomVectorRDD(spark.sparkContext, generator, samplesToAdd, 3, dataset.rdd.getNumPartitions)
-      val syntheticExamples = randomNumbers.map(x=>generateExample(x.toArray))
-
-      spark.createDataFrame(syntheticExamples).toDF()
-        .withColumnRenamed("_1", $(labelCol))
-        .withColumnRenamed("_2", $(featuresCol))
-    } else {
-      val r = new RandomOversample()
-      val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
-      model.transform(Smin).toDF()
-    }
-
-    /*val SiminClustersCollected = SiminKMeansClusters.select($(labelCol), $(featuresCol), "selectionProbabilities", "prediction")
-
-    val partitionWindow = Window.partitionBy($"label").orderBy($"selectionProbabilities".desc).rowsBetween(Window.unboundedPreceding, Window.currentRow)
-    val sumTest = sum($"selectionProbabilities").over(partitionWindow)
-    val runningTotals = SiminClustersCollected.select($"*", sumTest as "running_total")
-    val runningTotalsCollected = runningTotals.collect()
-    val groupedClusters = (0 until $(clusterK)).map(x=>runningTotalsCollected.filter(_(3)==x))
-
-    val r = new scala.util.Random()
-
-    // random
-    def generateExample(randomNumbers: Array[Double]): (Double, DenseVector) = {
-      // println(randomNumbers(0), randomNumbers(1), randomNumbers(2))
-      val randomIndexPoint = randomNumbers(0)
-      val selectedRow = runningTotalsCollected.filter(x => x(4).asInstanceOf[Double] >= randomIndexPoint)(0)
-
-      val label = selectedRow(0).asInstanceOf[Double]
-      val features = selectedRow(1).asInstanceOf[DenseVector]
-      val cluster = selectedRow(3).asInstanceOf[Int]
-
-      val randomIndex = (groupedClusters(cluster).length * randomNumbers(1)).toInt
-      val randomExample = groupedClusters(cluster)(randomIndex)(1).asInstanceOf[DenseVector]
-
-      val alpha = randomNumbers(2)
-      val synthetic = Array(features.toArray, randomExample.toArray).transpose.map(x => x(0) + alpha * (x(1) - x(0)))
-
-      (label, Vectors.dense(synthetic).toDense)
-    }
-
-    val generator = new UniformGenerator()
-
-    val syntheticDF = if(runningTotalsCollected.length > 0) {
-      val randomNumbers = randomVectorRDD(spark.sparkContext, generator, samplesToAdd, 3, dataset.rdd.getNumPartitions)
-      val syntheticExamples = randomNumbers.map(x=>generateExample(x.toArray))
-
-      spark.createDataFrame(syntheticExamples).toDF()
-        .withColumnRenamed("_1", $(labelCol))
-        .withColumnRenamed("_2", $(featuresCol))
-    } else {
-      val r = new RandomOversample()
-      val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
-      model.transform(Smin).toDF()
-    }*/
-
-    t1x = System.nanoTime()
-    println("12 time: " + (t1x - t0x) / 1e9 + "s")
-
-
-
-    /*def generateExample(): (Double, DenseVector) ={
-
-      val randomIndexPoint = r.nextDouble()
       val selectedRow = runningTotalsCollected.filter(x=>x(4).asInstanceOf[Double]>=randomIndexPoint)(0)
 
       val label = selectedRow(0).asInstanceOf[Double]
       val features = selectedRow(1).asInstanceOf[DenseVector]
       val cluster = selectedRow(3).asInstanceOf[Int]
 
-      val randomIndex = (groupedClusters(cluster).length * r.nextDouble()).toInt
+      val randomIndex = (groupedClusters(cluster).length * randomNumbers(1)).toInt
       val randomExample = groupedClusters(cluster)(randomIndex)(1).asInstanceOf[DenseVector]
 
-      val alpha = r.nextDouble()
+      val alpha = randomNumbers(2)
       val synthetic = Array(features.toArray, randomExample.toArray).transpose.map(x=> x(0) + alpha * (x(1) - x(0)))
 
       (label, Vectors.dense(synthetic).toDense)
     }
 
-    // Perform random oversampling if the class does not have appropriate examples for the standard method
-   val syntheticDF = if(runningTotalsCollected.length > 0) {
-      val syntheticExamples = (0 until samplesToAdd).map(_=>generateExample())
+    val generator = new UniformGenerator()
 
-      spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples)).toDF()
+    val syntheticDF = if(runningTotalsCollected.length > 0) {
+      val randomNumbers = randomVectorRDD(spark.sparkContext, generator, samplesToAdd, 3, dataset.rdd.getNumPartitions)
+      val syntheticExamples = randomNumbers.map(x=>generateExample(x.toArray))
+
+      spark.createDataFrame(syntheticExamples).toDF()
         .withColumnRenamed("_1",$(labelCol))
         .withColumnRenamed("_2",$(featuresCol))
     } else {
       val r = new RandomOversample()
       val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
       model.transform(Smin).toDF()
-    }*/
-    t1 = System.nanoTime()
-    println("remaining time 2: " + (t1 - t0) / 1e9 + "s")
+    }
 
     syntheticDF
   }
@@ -431,11 +296,8 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1==1.0)//filter(x=>x._1!=majorityClassLabel) //
+    val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
     val balancedDF: DataFrame = minorityClasses.map(x=>oversample(datasetSelected, x._1, majorityClassCount - x._2)).reduce(_ union _).union(datasetSelected.toDF()).select($(labelCol), $(featuresCol))
-
-    balancedDF.show()
-    balancedDF.printSchema()
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
@@ -453,8 +315,6 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
   }
 
 }
-
-
 
 
 /** Estimator Parameters*/

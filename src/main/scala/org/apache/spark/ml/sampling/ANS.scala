@@ -33,12 +33,12 @@ private[ml] trait ANSModelParams extends Params with HasFeaturesCol with HasLabe
     * Param for kNN top tree leaf size.
     * @group param
     */
-  final val distanceNeighborLimit: Param[Int] = new Param[Int](this, "distanceNeighborLimit", "limit of how many distance based neighbors to keep, default=0 returns all")
+  final val distanceNeighborLimit: Param[Int] = new Param[Int](this, "distanceNeighborLimit", "limit of how many distance based neighbors to keep, default=100, using 0 will returns all")
 
   /** @group getParam */
   final def setdDstanceNeighborLimit(value: Int): this.type = set(distanceNeighborLimit, value)
 
-  setDefault(cMaxRatio -> 0.25, distanceNeighborLimit -> 0)
+  setDefault(cMaxRatio -> 0.25, distanceNeighborLimit -> 100)
 }
 
 /** Transformer */
@@ -111,7 +111,7 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
    import scala.util.control._
     val loop = new Breaks
     loop.breakable {
-      for (c <- 1 until C_max) { // FIXME
+      for (c <- 1 until C_max) {
         val number_of_outcasts = outBorderArray.filter(x => x >= c).sum
         if (Math.abs(number_of_outcasts - previous_number_of_outcasts) == 0) {
           C = c
@@ -152,7 +152,7 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
     val syntheticExamples: Array[Array[Row]] = generatedSampleCounts.drop("closestPosDistance", "searchDistance", "distances", "neighborCount").filter("neighborCount > 0")
       .collect.map(x=>createSample(x))
 
-    val totalExamples: Array[Row] = syntheticExamples.flatMap(x => x.toSeq).take(samplesToAdd) // FIXME - check this - sample down to required count
+    val totalExamples: Array[Row] = syntheticExamples.flatMap(x => x.toSeq).take(samplesToAdd)
 
     spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(totalExamples), dataset.schema)
   }
@@ -185,7 +185,6 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
       val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-      // FIXME - test run did not generate new samples, adjust parameters
       balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
         .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
   }

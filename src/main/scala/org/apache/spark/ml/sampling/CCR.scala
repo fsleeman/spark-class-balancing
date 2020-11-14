@@ -28,7 +28,16 @@ private[ml] trait CCRModelParams extends Params with HasFeaturesCol with HasLabe
   /** @group getParam */
   final def setEnergy(value: Double): this.type = set(energy, value)
 
-  setDefault(energy -> 0.64)
+  /**
+    * Param for kNN top tree leaf size.
+    * @group param
+    */
+  final val distanceNeighborLimit: Param[Int] = new Param[Int](this, "distanceNeighborLimit", "limit of how many distance based neighbors to keep, default=100, using 0 will returns all")
+
+  /** @group getParam */
+  final def setdDstanceNeighborLimit(value: Int): this.type = set(distanceNeighborLimit, value)
+
+  setDefault(energy -> 1.0, distanceNeighborLimit -> 100)
 }
 
 /** Transformer */
@@ -148,17 +157,15 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
     val majorityDF = dataset.filter(dataset($(labelCol)) =!= minorityClassLabel)
 
-    /// FIXME - switch to distance?
     val model = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), majorityDF.count()))
       .setTopTreeLeafSize($(topTreeLeafSize))
       .setSubTreeLeafSize($(subTreeLeafSize))
-      .setK($(k) + 1) // include self example
       .setAuxCols(Array("index", $(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
     val fitModel: KNNModel = model.fit(majorityDF)
-    fitModel.setDistanceCol("distances")
+    fitModel.setDistanceCol("distances").setQueryByDistance(true).setDistanceNeighborLimit($(distanceNeighborLimit))
 
     val minorityDataNeighbors = fitModel.transform(minorityDF)
 

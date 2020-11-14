@@ -31,49 +31,35 @@ private[ml] trait KMeansSMOTEModelParams extends Params with HasFeaturesCol with
     * Param for imbalance ratio threshold.
     * @group param
     */
+  final val densityExponent: Param[Int] = new Param[Int](this, "densityExponent", "density exponent, default is the number of features if set to 0")
+
+  /** @group getParam */
+  final def setDensityExponent(value: Int): this.type = set(densityExponent, value)
+
+  /**
+    * Param for imbalance ratio threshold.
+    * @group param
+    */
   final val imbalanceRatioThreshold: Param[Double] = new Param[Double](this, "imbalanceRatioThreshold", "imbalance ratio threshold")
 
   /** @group getParam */
   final def setImbalanceRatioThreshold(value: Double): this.type = set(imbalanceRatioThreshold, value)
 
-  setDefault(clusterK -> 5, imbalanceRatioThreshold -> 10.0)
+  /**
+    * Param for knn brute force size
+    * @group param
+    */
+  final val bruteForceSize: Param[Int] = new Param[Int](this, "bruteForceSize", "knn brute force size")
+
+  /** @group getParam */
+  final def setBruteForceSize(value: Int): this.type = set(bruteForceSize, value)
+
+  setDefault(clusterK -> 5, imbalanceRatioThreshold -> 10.0, bruteForceSize -> 100, densityExponent -> 0)
 }
 
 /** Transformer */
 class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMeansSMOTEModel] with KMeansSMOTEModelParams {
   def this() = this(Identifiable.randomUID("kmeanssmote"))
-
-  private def getFeaturePoint(ax: Double, bx: Double) : Double ={
-    Random.nextDouble() * (Math.max(ax, bx) - Math.min(ax, bx)) + Math.min(ax, bx)
-  }
-
-  private def getSmotePoint(a: Array[Double], b: Array[Double]): Array[Double] = {
-    a.indices.map(x => getFeaturePoint(a(x), b(x))).toArray
-  }
-
-  private def getSmoteExample(knnExamples: Array[Array[Double]]): Array[Double] ={
-    val a = knnExamples(0)
-    val b = knnExamples(Random.nextInt(knnExamples.length))
-    getSmotePoint(a, b)
-  }
-
-  val toArr: Any => Array[Double] = _.asInstanceOf[DenseVector].toArray
-  val toArrUdf: UserDefinedFunction = udf(toArr)
-
-  private def getTotalElementDistance(current: Array[Double], rows: Array[Array[Double]]): Double ={
-    rows.map(x=>getSingleDistance(x, current)).sum
-  }
-
-  private def getSparsity(data: Dataset[Row], imbalancedRatio: Double): Double = {
-    // FIXME - use dataset schema access method
-    val collected: Array[Array[Double]] =  data.withColumn($(featuresCol), toArrUdf(col($(featuresCol)))).select($(featuresCol)).collect().map(x=>x.toString.substring(14, x.toString.length-2).split(",").map(x=>x.toDouble)) // FIXME
-    val n = collected.length // number of minority examples in cluster
-    val m = collected(0).length // number of features
-    val meanDistance = collected.map(x=>getTotalElementDistance(x, collected)).sum / ((n * n) - n)
-    val density = n / Math.pow(meanDistance, m)
-    val sparsity = 1 / density
-    sparsity
-  }
 
   private def getSingleDistance(x: Array[Double], y: Array[Double]): Double = {
     var distance = 0.0
@@ -98,14 +84,11 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     collected.map(x=>getInstanceAverageDistance(x, collected)).sum / collected.length.toDouble
   }
 
-  // FIXME - use this code again?
-  // FIXME - Fix hard coded code that fixes for small clusters
   def sampleCluster(df: DataFrame, samplesToAdd: Int): DataFrame ={
-    if(df.count < 100) {
-      println("kMeans cluster df count: " + df.count)
+    if(df.count < $(bruteForceSize)) {
       val r = new SMOTE
       val model = r.fit(df).setBalanceThreshold(0.0).setTopTreeSize(df.count.toInt).setTopTreeLeafSize(df.count.toInt)
-        .setSubTreeLeafSize(100).setK($(k))
+        .setSubTreeLeafSize($(bruteForceSize)).setK($(k))
       model.oversample(df, samplesToAdd)
     } else {
       val r = new SMOTE
@@ -121,7 +104,7 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
     val spark = dataset.sparkSession
 
     // STEP 1
-    val kmeans = new KMeans().setK($(clusterK))//.setSeed(1L) // FIXME - fix seed
+    val kmeans = new KMeans().setK($(clusterK))
     val model = kmeans.fit(dataset)
     val predictions = model.transform(dataset)
 
@@ -133,23 +116,23 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
 
     val averageDistances = filteredClusters.indices.map(x=>getAverageDistance(filteredClusters(x))).toArray
 
-    // FIXME, this doesnt really work with high dimensional data
-    val densities = filteredClusters.indices.map(x=>filteredClusters(x).count.toDouble / Math.pow(averageDistances(x), numberOfFeatures))
+    val densityExp = if($(densityExponent) > 0) {
+      $(densityExponent)
+    } else {
+      numberOfFeatures
+    }
+    val densities = filteredClusters.indices.map(x=>filteredClusters(x).count.toDouble / Math.pow(averageDistances(x), densityExp))
     val sparsities = densities.indices.map(x=>1/densities(x))
     val clusterWeights = sparsities.indices.map(x=>sparsities(x)/sparsities.sum)
     val clusterSamples = clusterWeights.indices.map(x=>(samplesToAdd*clusterWeights(x)).toInt)
 
     val clusterExamples = filteredClusters.indices.map(x=>sampleCluster(filteredClusters(x), clusterSamples(x))).toArray
 
-
     clusterExamples.reduce(_ union _)
   }
 
     override def transform(dataset: Dataset[_]): DataFrame = {
-    // FIXME - add de -density parameter, currently auto calculated
     //FIXME - add warning about missing clusters
-
-    // val densityExponent = 10 // FIXME - number of features, make parameter as well?
 
       val indexer = new StringIndexer()
         .setInputCol($(labelCol))

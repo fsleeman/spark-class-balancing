@@ -46,7 +46,8 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
       val randomIndicies = (0 until examplesToCreate).map(_ => minorityIndicies.toVector(Random.nextInt(minorityIndicies.length)))
       (0 until examplesToCreate).map(x => Row(label, neighborFeatures(randomIndicies(x)))).toArray
     } else {
-      val features: Array[Double] = neighborFeatures.head.toArray // FIXME - wut?
+      // just in case we end up here
+      val features: Array[Double] = neighborFeatures.head.toArray
       (0 until examplesToCreate).map(_ => Row(label, Vectors.dense(features).toDense)).toArray
     }
   }
