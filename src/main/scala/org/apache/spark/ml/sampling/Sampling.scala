@@ -408,6 +408,53 @@ object Sampling {
     minorityDF
   }
 
+  def indexDF(df: DataFrame): DataFrame = {
+    val spark = df.sparkSession
+    import spark.implicits._
+
+    val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
+
+    val data: RDD[(Long, String, Array[Double])] = train_index.map({ r =>
+      val array = r._2.toSeq.toArray.reverse
+      val cls = array.head.toString
+      val rowMapped: Array[Double] = array.tail.map(_.toString.toDouble)
+      //NOTE - This needs to be back in the original order to train/test works correctly
+      (r._1, cls, rowMapped.reverse)
+    })
+
+    data.toDF().withColumnRenamed("_1", "index")
+      .withColumnRenamed("_2", "label")
+      .withColumnRenamed("_3", "features")
+  }
+
+  def indexDF2(df: DataFrame): DataFrame ={
+    val spark = df.sparkSession
+    import spark.implicits._
+
+    val train_index: RDD[(Long, Row)] = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
+
+    val data: RDD[(Long, String, Int, DenseVector)] = train_index.map({ r =>
+      val array = r._2.toSeq.toArray//.reverse
+      val minorityType = array.head.toString.toInt // array.head.toString.toInt
+      val arrayReversed = array.tail.reverse
+      val cls = arrayReversed.head.toString
+      //val rowMapped: Array[Double] = arrayReversed.tail.head//.map(_.toString.toDouble)
+      //println("-- " + arrayReversed.tail.head.asInstanceOf[DenseVector])
+     // val x= arrayReversed.tail.map(_.toString)
+     // for(v<-x) {
+     //   println("~~" + v)
+     // }
+      //val rowMapped: Array[Double] = array.tail.asInstanceOf[DenseVector].toArray//.map(_.toString.toDouble)
+      //NOTE - This needs to be back in the original order to train/test works correctly
+      //println(r._1, r._2)
+      (r._1, cls, minorityType, arrayReversed.tail.head.asInstanceOf[DenseVector])
+    })
+
+    data.toDF().withColumnRenamed("_1", "index")
+      .withColumnRenamed("_2", "label")
+      .withColumnRenamed("_3", "minorityType")
+      .withColumnRenamed("_4", "features")
+  }
 
 
   def main(args: Array[String]) {
@@ -438,7 +485,7 @@ object Sampling {
       option("header", true).
       csv(input_file).withColumnRenamed(labelColumnName, "label")
 
-    val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
+    /*val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
 
     val data: RDD[(Long, String, Array[Double])] = train_index.map({ r =>
       val array = r._2.toSeq.toArray.reverse
@@ -450,7 +497,9 @@ object Sampling {
 
     val results: DataFrame = data.toDF().withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
-      .withColumnRenamed("_3", "features")
+      .withColumnRenamed("_3", "features")*/
+
+    val results = indexDF(df)
 
     results.show()
     results.printSchema()
@@ -495,7 +544,7 @@ object Sampling {
     datasetIndexed.show()
     datasetIndexed.printSchema()
 
-    val scaledData = datasetIndexed
+    val scaledData = datasetIndexed//.filter(datasetIndexed("label") === 0.0 || datasetIndexed("label") === 7.0 )
 
 
     // FIXME - add pipeline
@@ -525,11 +574,71 @@ object Sampling {
 
     val minorityTypeList = Array("SBRO") //, "SBR", "SBO",  "SRO", "SB", "SR", "SO", "BRO", "BR", "BO", "RO", "S", "B", "R", "O")
 
+    val countsBy = getCountsByClass("label", scaledData)
+    countsBy.show
+    val labelList = countsBy.select("_1").collect().map(x=>x(0).toString.toDouble)
+
+    val clsFiltered = labelList.map(x=>scaledData.filter(scaledData("label")===x).drop("index")).map(x=>indexDF2(x))
+
+    /*for(x<-clsFiltered) {
+      println(x._1 + " " + x._2.count())
+    }*/
+
+    def getStratifiedSplit(dfs: Array[DataFrame], totalSplits: Int, splitIndex: Int, minorityType: String = ""): (DataFrame, DataFrame) ={
+      val splitIndexLow = (splitIndex)/ totalSplits.toDouble
+      val splitIndexHigh = (splitIndex + 1)/ totalSplits.toDouble
+      val testFiltered = dfs.map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow).drop("index"))
+      val testDF = testFiltered.reduce(_ union _)
+
+      val trainFiltered = dfs.map(x=>x.filter(x("index") >= x.count() * splitIndexHigh || x("index") < x.count() * splitIndexLow))
+      val trainDF = if(minorityType == "" | minorityType == "SBRO") {
+        trainFiltered.reduce(_ union _)
+      } else {
+        filterByMinorityType(trainFiltered.reduce(_ union _), minorityType)
+      }
+      println("train")
+      getCountsByClass("label", trainDF).show()
+      println("test")
+      getCountsByClass("label", testDF).show()
+
+
+      (trainDF, testDF)
+    }
+
+
+
+  // val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
+
+
+    /*println("scaled")
+    scaledData.show
+    val xx = scaledData.filter(scaledData("label")==="0.0").drop("index")
+    xx.show
+    val bar = indexDF2(xx)
+    bar.show()
+    bar.printSchema()*/
+
+    /*clsFiltered(0).show()
+    clsFiltered(0).printSchema()
+
+    clsFiltered(1).show()
+    clsFiltered(1).printSchema()*/
+    //clsFiltered(1).show()
+
+
     for(mt<-minorityTypeList) {
       for(splitIndex<-0 until numSplits) {
         println("splitIndex: " + splitIndex + " numSplits: " + numSplits)
-        val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
-        val trainData = filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), mt).persist()//scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)).persist() //filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), "SBRO").persist()
+        val datasets = if(numSplits == 1) {
+          getStratifiedSplit(clsFiltered, 5, 0)
+        } else {
+          getStratifiedSplit(clsFiltered, numSplits, splitIndex)
+        }
+        val trainData = datasets._1
+        val testData = datasets._2
+
+        //val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
+        //val trainData = filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), mt).persist()//scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)).persist() //filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), "SBRO").persist()
         println("trainSchema")
         trainData.printSchema()
 
