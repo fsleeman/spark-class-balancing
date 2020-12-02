@@ -3,7 +3,7 @@ package org.apache.spark.ml.sampling
 import java.io.File
 
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.classification.{RandomForestClassifier, LinearSVC, OneVsRest}
+import org.apache.spark.ml.classification.{RandomForestClassifier, NaiveBayes, LinearSVC, OneVsRest}
 import org.apache.spark.ml.feature.MinMaxScaler
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.rdd.RDD
@@ -31,6 +31,8 @@ object Sampling {
   type Element = (Long, (Int, Array[Float]))
   type DistanceResult = (Float, Int)
 
+  var cParam = 0.0
+
   /*def maxValue(a: Double, b:Double): Double ={
     if(a >= b) { a }
     else { b }
@@ -48,7 +50,7 @@ object Sampling {
   }
 
 
-  def calculateClassifierResults(distinctClasses: DataFrame, confusionMatrix: DataFrame, labels: Array[Double]): Array[String]={//String ={
+  def calculateClassifierResults(distinctClasses: DataFrame, confusionMatrix: DataFrame, labels: Array[Double]): Array[String]={
 
     println("LABELS")
     for(x<-labels) {
@@ -312,6 +314,25 @@ object Sampling {
     (index, currentLabel, getMinorityClassLabel(currentCount), features)//features.toString().asInstanceOf[mutable.WrappedArray[Double]])
   }
 
+  def readNonInstanceLevelDiffuclty(df: DataFrame, dataFile: String, minorityTypePath: String): DataFrame ={
+    val path = minorityTypePath + "/" + dataFile + "DF"
+    val readData = df.sparkSession.read.
+      option("inferSchema", true).
+      option("header", true).
+      csv(path)
+
+    val stringToArray = udf((item: String)=>{
+      val features: Array[Double] = item.dropRight(1).drop(1).split(",").map(x=>x.toDouble)
+      Vectors.dense(features).toDense
+    })
+
+    val intToLong = udf((index: Int)=>{
+      index.toLong
+    })
+
+    readData.withColumn("features", stringToArray(col("features"))).withColumn("index", intToLong(col("index")))
+  }
+
   def getInstanceLevelDifficulty(df: DataFrame, dataFile: String, minorityTypePath: String): DataFrame ={
     val path = minorityTypePath + "/" + dataFile + "DF"
 
@@ -461,15 +482,20 @@ object Sampling {
 
     val filename = args(0)// "/home/ford/data/sampling_input.txt"
     val lines = Source.fromFile(filename).getLines.map(x=>x.split(":")(0)->x.split(":")(1)).toMap
-    val input_file = lines("dataset").trim
+    // val input_file = lines("dataset").trim
     val classifier = lines("classifier").trim
     val samplingMethods = lines("sampling").split(",").map(x=>x.trim)
     val labelColumnName = lines("labelColumn").trim
     val enableDataScaling = if(lines("enableScaling").trim == "true") true else false
     val numSplits = lines("numCrossValidationSplits").trim.toInt
-    val minorityTypePath = lines("minorityTypePath").trim
+    // val minorityTypePath = lines("minorityTypePath").trim
     val savePath = lines("savePath").trim
+    val datasetSize = lines("datasetSize").trim
+    val datasetPath = lines("datasetPath").trim
+    val datasetName = lines("datasetName").trim
+    val cParam = lines("c").trim
 
+    val input_file = datasetPath + "/" + datasetName  + datasetSize + ".csv"
     println("input")
     for(x<-lines) {
       println(x)
@@ -485,7 +511,7 @@ object Sampling {
       option("header", true).
       csv(input_file).withColumnRenamed(labelColumnName, "label")
 
-    /*val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
+    val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
 
     val data: RDD[(Long, String, Array[Double])] = train_index.map({ r =>
       val array = r._2.toSeq.toArray.reverse
@@ -497,9 +523,9 @@ object Sampling {
 
     val results: DataFrame = data.toDF().withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
-      .withColumnRenamed("_3", "features")*/
+      .withColumnRenamed("_3", "features")
 
-    val results = indexDF(df)
+    // val results = indexDF(df)
 
     results.show()
     results.printSchema()
@@ -527,17 +553,18 @@ object Sampling {
     } else { converted }.cache()
 
 
-    val dataFile = input_file.split("/").reverse.head
-    println("***** file : " + dataFile.substring(0, dataFile.length-4))
-    val instanceLevelDF = getInstanceLevelDifficulty(scaledDataIn, dataFile.substring(0, dataFile.length-4), minorityTypePath)
-    println("@@@@")
-    instanceLevelDF.show()
+    //val dataFile = input_file.split("/").reverse.head
+    // println("***** file : " + dataFile.substring(0, dataFile.length-4))
+    //val instanceLevelDF = getInstanceLevelDifficulty(scaledDataIn, dataFile.substring(0, dataFile.length-4), minorityTypePath)
+    //val instanceLevelDF = df// readNonInstanceLevelDiffuclty(scaledDataIn, dataFile.substring(0, dataFile.length-4), minorityTypePath)
+    //println("@@@@")
+    //instanceLevelDF.show()
 
     val indexer = new StringIndexer()
       .setInputCol("label")
       .setOutputCol("labelIndexed")
 
-    val datasetIndexed = indexer.fit(instanceLevelDF).transform(instanceLevelDF).drop("label")
+    val datasetIndexed = indexer.fit(scaledDataIn).transform(scaledDataIn).drop("label")
       .withColumnRenamed("labelIndexed", "label")
 
     println("here")
@@ -578,7 +605,7 @@ object Sampling {
     countsBy.show
     val labelList = countsBy.select("_1").collect().map(x=>x(0).toString.toDouble)
 
-    val clsFiltered = labelList.map(x=>scaledData.filter(scaledData("label")===x).drop("index")).map(x=>indexDF2(x))
+    val clsFiltered = labelList.map(x=>scaledData.filter(scaledData("label")===x))//.drop("index"))//.map(x=>indexDF2(x))
 
     /*for(x<-clsFiltered) {
       println(x._1 + " " + x._2.count())
@@ -587,7 +614,7 @@ object Sampling {
     def getStratifiedSplit(dfs: Array[DataFrame], totalSplits: Int, splitIndex: Int, minorityType: String = ""): (DataFrame, DataFrame) ={
       val splitIndexLow = (splitIndex)/ totalSplits.toDouble
       val splitIndexHigh = (splitIndex + 1)/ totalSplits.toDouble
-      val testFiltered = dfs.map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow).drop("index"))
+      val testFiltered = dfs.map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow)) // .drop("index"))
       val testDF = testFiltered.reduce(_ union _)
 
       val trainFiltered = dfs.map(x=>x.filter(x("index") >= x.count() * splitIndexHigh || x("index") < x.count() * splitIndexLow))
@@ -679,7 +706,7 @@ object Sampling {
            val model = r.fit(trainData).setBalanceThreshold(0.0)
            model.transform(trainData)
          }  else if(samplingMethod == "rbo") {
-           val r = new RBO()
+           val r = new RBO().setGamma(0.001).setStepSize(0.001).setIterations(100).setStoppingProbability(0.001)
            val model = r.fit(trainData)
            model.transform(trainData)
          } else if(samplingMethod == "adasyn") {
@@ -763,7 +790,7 @@ object Sampling {
          write.format("com.databricks.spark.csv").
          option("header", "true").
          mode("overwrite").
-         save(savePath + "/" + splitIndex)
+         save(savePath + "/" + classifier + "/" + datasetName + datasetSize + "/" + splitIndex)
 
        trainData.unpersist()
        testData.unpersist()
@@ -775,16 +802,19 @@ object Sampling {
 
     // first("mt").as("mt"),
     val totals = totalResults.groupBy("sampling", "mt").agg(avg("AvAvg").as("AvAvg"),
-      avg("MAvG").as("MAvG"), avg("RecM").as("RecM"), avg("Recu").as("Recu"),
-      avg("PrecM").as("PrecM"), avg("Precu").as("Precu"), avg("FbM").as("FbM"),
-      avg("Fbu").as("Fbu"), avg("AvFb").as("AvFb"), avg("CBA").as("CBA"), avg("time").as("time"))
+      avg("MAvG").as("MAvG"), avg("RecM").as("RecM"),
+      avg("Recu").as("Recu"), avg("PrecM").as("PrecM"),
+      avg("Precu").as("Precu"), avg("FbM").as("FbM"),
+      avg("Fbu").as("Fbu"), avg("AvFb").as("AvFb"),
+      avg("CBA").as("CBA"), avg("classifierTime").as("classifierTime"),
+      avg("samplingTime").as("samplingTime"))
     totals.show
 
     totals.repartition(1).
       write.format("com.databricks.spark.csv").
       option("header", "true").
       mode("overwrite").
-      save(savePath + "/totals")
+      save(savePath + "/" + classifier + "/" + datasetName + datasetSize + "/totals")
   }
 
   def buildResultDF(spark: SparkSession, resultArray: Array[Array[String]] ): DataFrame = {
@@ -796,7 +826,7 @@ object Sampling {
       }
     }
     val csvResults = resultArray.map(x => x match {
-      case Array(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12) => (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12)
+      case Array(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) => (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13)
     }).toSeq
     val c = spark.sparkContext.parallelize(csvResults).toDF
     val lookup = Map(
@@ -812,7 +842,8 @@ object Sampling {
       "_10" -> "Fbu",
       "_11" -> "AvFb",
       "_12" -> "CBA",
-      "_13" -> "time"
+      "_13" -> "classifierTime",
+      "_14" -> "samplingTime"
     )
 
     val cols = c.columns.map(name => lookup.get(name) match {
@@ -846,27 +877,32 @@ object Sampling {
     //val minLabel: Double = indexedTest.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble).min
     // val inputCols = test.columns.filter(_ != "label")
 
+    val t0 = System.nanoTime()
+
     val cls = if(classifier == "svm") {
       val lsvm = new LinearSVC()
-        .setMaxIter(50)
-        .setRegParam(0.1)
+        .setMaxIter(100)
+        .setRegParam(cParam)
 
       new OneVsRest().setClassifier(lsvm)
+    } else if(classifier == "nb") {
+      new NaiveBayes()
     } else {
-      new RandomForestClassifier().setNumTrees(50).
-        setSeed(42L).
-        setLabelCol("label").
-        setFeaturesCol("features").
-        setPredictionCol("prediction")
+    new RandomForestClassifier().setNumTrees(100).setMaxDepth(25).
+      setSeed(42L).
+      setLabelCol("label").
+      setFeaturesCol("features").
+      setPredictionCol("prediction")
     }
-
 
     indexedTrain.show
     indexedTrain.printSchema()
 
-
     val model = cls.fit(indexedTrain)
     val predictions: DataFrame = model.transform(indexedTest)
+
+    val t1 = System.nanoTime()
+    val classifierTime = (t1 - t0) / 1e9
 
     predictions.show(100)
     predictions.printSchema()
@@ -907,7 +943,7 @@ object Sampling {
     println("cm")
     confusionMatrix.printSchema()
 
-    calculateClassifierResults(indexedTest.select("label").distinct(), confusionMatrix, labels)
+    calculateClassifierResults(indexedTest.select("label").distinct(), confusionMatrix, labels) ++ Array(classifierTime.toString)
   }
 
 }
