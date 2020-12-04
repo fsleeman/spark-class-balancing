@@ -15,6 +15,7 @@ import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.mllib.random.RandomRDDs._
+import org.apache.spark.sql.expressions.UserDefinedFunction
 
 import scala.collection.mutable
 import scala.util.Random
@@ -65,6 +66,20 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     Row(label, syntheticExample)
   }
 
+  // FIXME - move these to utilities
+  val checkForNegatives: UserDefinedFunction = udf((features: DenseVector) => {
+    if(features.values.min < 0.0 || features.values.count(_.isNaN) > 0) {
+      true
+    } else {
+      false
+    }
+  })
+
+  def removeNegatives(df: DataFrame): DataFrame ={
+    val negatives = df.withColumn("negativesPresent", checkForNegatives(df.col($(featuresCol))))
+    negatives.filter(negatives("negativesPresent")=!=true).drop("negativesPresent")
+  }
+
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
     val df = dataset.toDF
     val spark = df.sparkSession
@@ -90,7 +105,7 @@ class GaussianSMOTEModel private[ml](override val uid: String) extends Model[Gau
     val collected = minorityDataNeighbors.withColumn("neighborFeatures", $"neighbors.features").drop("neighbors").collect
     val createdSamples = spark.createDataFrame(spark.sparkContext.parallelize(rnd.map(x=>getSmoteSample(collected(x)))), dataset.schema)
 
-    createdSamples
+    removeNegatives(createdSamples)
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {

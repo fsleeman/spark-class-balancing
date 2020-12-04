@@ -15,6 +15,7 @@ import org.apache.spark.sql.{DataFrame, Row}
 import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.sql._
+import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.types.StructType
 
 
@@ -111,6 +112,19 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
     fitModel2.transform(dfNeighborRatio)
   }
 
+  val checkForNegatives: UserDefinedFunction = udf((features: DenseVector) => {
+    if(features.values.min < 0.0 || features.values.count(_.isNaN) > 0) {
+      true
+    } else {
+      false
+    }
+  })
+
+  def removeNegatives(df: DataFrame): DataFrame ={
+    val negatives = df.withColumn("negativesPresent", checkForNegatives(df.col($(featuresCol))))
+    negatives.filter(negatives("negativesPresent")=!=true).drop("negativesPresent")
+  }
+
 
   def oversample(minorityNearestNeighbor: Dataset[_], datasetSchema: StructType, minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
     val spark = minorityNearestNeighbor.sparkSession
@@ -127,7 +141,7 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
         x(1).asInstanceOf[DenseVector], x(5).asInstanceOf[mutable.WrappedArray[DenseVector]],
         x(4).asInstanceOf[mutable.WrappedArray[Double]], samplingRate)).reduce(_ union _ )
 
-      val result = spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples), datasetSchema)
+      val result = removeNegatives(spark.createDataFrame(spark.sparkContext.parallelize(syntheticExamples), datasetSchema))
 
       if(syntheticExamples.length * (1.0 + $(samplingCorrectionRate)) > samplesToAdd) {
         result.sample(withReplacement=false, samplesToAdd.toDouble/syntheticExamples.length.toDouble)

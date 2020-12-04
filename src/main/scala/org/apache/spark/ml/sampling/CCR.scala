@@ -247,6 +247,19 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     finalDF
   }
 
+  val checkForNegatives: UserDefinedFunction = udf((features: DenseVector) => {
+    if(features.values.min < 0.0 || features.values.count(_.isNaN) > 0) {
+      true
+    } else {
+      false
+      }
+    })
+
+  def removeNegatives(df: DataFrame): DataFrame ={
+    val negatives = df.withColumn("negativesPresent", checkForNegatives(df.col($(featuresCol))))
+    negatives.filter(negatives("negativesPresent")=!=true).drop("negativesPresent")
+  }
+
   override def transform(dataset: Dataset[_]): DataFrame = {
     val indexer = new StringIndexer()
       .setInputCol($(labelCol))
@@ -274,6 +287,8 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     for(minorityClass<-minorityClasses) {
       ds = oversample(ds, minorityClass._1, majorityClassCount - minorityClass._2)
     }
+
+    ds = removeNegatives(ds)
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
     ds.drop("index").withColumn("originalLabel", restoreLabel(ds.col($(labelCol)))).drop($(labelCol))
