@@ -1,9 +1,10 @@
 package org.apache.spark.ml.sampling
 
+import java.io
 import java.io.File
 
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.classification.{RandomForestClassifier, NaiveBayes, LinearSVC, OneVsRest}
+import org.apache.spark.ml.classification.{LinearSVC, NaiveBayes, OneVsRest, RandomForestClassifier}
 import org.apache.spark.ml.feature.MinMaxScaler
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.rdd.RDD
@@ -483,7 +484,7 @@ object Sampling {
     val filename = args(0)// "/home/ford/data/sampling_input.txt"
     val lines = Source.fromFile(filename).getLines.map(x=>x.split(":")(0)->x.split(":")(1)).toMap
     // val input_file = lines("dataset").trim
-    val classifier = lines("classifier").trim
+    val classifiers = lines("classifier").trim.split(',')
     val samplingMethods = lines("sampling").split(",").map(x=>x.trim)
     val labelColumnName = lines("labelColumn").trim
     val enableDataScaling = if(lines("enableScaling").trim == "true") true else false
@@ -493,7 +494,7 @@ object Sampling {
     val datasetSize = lines("datasetSize").trim
     val datasetPath = lines("datasetPath").trim
     val datasetName = lines("datasetName").trim
-    val cParam = lines("c").trim
+    // val cParam = lines("c").trim
 
     val input_file = datasetPath + "/" + datasetName  + datasetSize + ".csv"
     println("input")
@@ -527,8 +528,8 @@ object Sampling {
 
     // val results = indexDF(df)
 
-    results.show()
-    results.printSchema()
+    // results.show()
+    // results.printSchema()
 
 
 
@@ -543,7 +544,7 @@ object Sampling {
     })
 
     val scaledDataIn: DataFrame = if(enableDataScaling) {
-      val scaler = new MinMaxScaler()
+      val scaler = new MinMaxScaler().setMin(0.0).setMax(1.0)
         .setInputCol("features")
         .setOutputCol("scaledFeatures")
       val scalerModel = scaler.fit(converted)
@@ -774,23 +775,27 @@ object Sampling {
            saveDirectory.mkdirs()
          }
 
-         val x: Array[String] = Array(samplingMethod, mt) ++ runClassifierMinorityType(classifier, sampledData, testData) ++ Array(((t1 - t0) / 1e9).toString)
+         // val x: Array[String] = Array(samplingMethod) ++ runClassifierMinorityType(classifiers, sampledData, testData) ++ Array(((t1 - t0) / 1e9).toString)
+         val z: Array[Array[String]] = runClassifierMinorityType(classifiers, sampledData, testData).map(x=>Array(datasetName, samplingMethod) ++ x ++ Array(((t1 - t0) / 1e9).toString, (x.tail.reverse.head.toDouble + (t1 - t0) / 1e9).toString))
+         // ++ Array(((t1 - t0) / 1e9).toString) // .map(x=>Array(samplingMethod) ++ x)
 
-         resultArray = resultArray :+ x
-         combinedSplitResults = combinedSplitResults :+ x
+         // resultArray = resultArray :+ x
+         // combinedSplitResults = combinedSplitResults :+ x
+         resultArray = resultArray ++ z
+         combinedSplitResults = combinedSplitResults ++ z
        }
 
+       // resultArray = resultArray.map(x=>x ++ Array((x.tail.reverse(0).toDouble + x.tail.reverse(1).toDouble).toString))
        val resultsDF = buildResultDF(spark, resultArray)
        println("Split Number: " + splitIndex)
        resultsDF.show
-
 
         // FIXME - save path for method as well
        resultsDF.repartition(1).
          write.format("com.databricks.spark.csv").
          option("header", "true").
          mode("overwrite").
-         save(savePath + "/" + classifier + "/" + datasetName + datasetSize + "/" + splitIndex)
+         save(savePath + "/" + datasetName + datasetSize + "/" + splitIndex)
 
        trainData.unpersist()
        testData.unpersist()
@@ -801,20 +806,20 @@ object Sampling {
     val totalResults = buildResultDF(spark, combinedSplitResults)
 
     // first("mt").as("mt"),
-    val totals = totalResults.groupBy("sampling", "mt").agg(avg("AvAvg").as("AvAvg"),
+    val totals = totalResults.groupBy("dataset", "sampling", "classifier").agg(avg("AvAvg").as("AvAvg"),
       avg("MAvG").as("MAvG"), avg("RecM").as("RecM"),
       avg("Recu").as("Recu"), avg("PrecM").as("PrecM"),
       avg("Precu").as("Precu"), avg("FbM").as("FbM"),
       avg("Fbu").as("Fbu"), avg("AvFb").as("AvFb"),
       avg("CBA").as("CBA"), avg("classifierTime").as("classifierTime"),
-      avg("samplingTime").as("samplingTime"))
+      avg("samplingTime").as("samplingTime"), avg("totalTime").as("totalTime"))
     totals.show
 
     totals.repartition(1).
       write.format("com.databricks.spark.csv").
       option("header", "true").
       mode("overwrite").
-      save(savePath + "/" + classifier + "/" + datasetName + datasetSize + "/totals")
+      save(savePath + "/" + datasetName + datasetSize + "/totals")
   }
 
   def buildResultDF(spark: SparkSession, resultArray: Array[Array[String]] ): DataFrame = {
@@ -826,24 +831,26 @@ object Sampling {
       }
     }
     val csvResults = resultArray.map(x => x match {
-      case Array(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) => (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13)
+      case Array(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15) => (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15)
     }).toSeq
     val c = spark.sparkContext.parallelize(csvResults).toDF
     val lookup = Map(
-      "_1" -> "sampling",
-      "_2" -> "mt",
-      "_3" -> "AvAvg",
-      "_4" -> "MAvG",
-      "_5" -> "RecM",
-      "_6" -> "Recu",
-      "_7" -> "PrecM",
-      "_8" -> "Precu",
-      "_9" -> "FbM",
-      "_10" -> "Fbu",
-      "_11" -> "AvFb",
-      "_12" -> "CBA",
-      "_13" -> "classifierTime",
-      "_14" -> "samplingTime"
+      "_1" -> "dataset",
+      "_2" -> "sampling",
+      "_3" -> "classifier",
+      "_4" -> "AvAvg",
+      "_5" -> "MAvG",
+      "_6" -> "RecM",
+      "_7" -> "Recu",
+      "_8" -> "PrecM",
+      "_9" -> "Precu",
+      "_10" -> "FbM",
+      "_11" -> "Fbu",
+      "_12" -> "AvFb",
+      "_13" -> "CBA",
+      "_14" -> "classifierTime",
+      "_15" -> "samplingTime",
+      "_16" -> "totalTime"
     )
 
     val cols = c.columns.map(name => lookup.get(name) match {
@@ -854,7 +861,7 @@ object Sampling {
     c.select(cols: _*)
   }
 
-  def runClassifierMinorityType(classifier: String, train: DataFrame, test: DataFrame): Array[String] ={
+  def runClassifierMinorityType(classifiers: Array[String], train: DataFrame, test: DataFrame): Array[Array[String]] ={
 
     import train.sparkSession.implicits._
     val indexer = new StringIndexer()
@@ -863,8 +870,8 @@ object Sampling {
 
 
     val indexerModel = indexer.fit(train)
-    val indexedTrain = indexerModel.transform(train).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label")
-    val indexedTest = indexerModel.transform(test).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label")//.sample(0.05)
+    val indexedTrain = indexerModel.transform(train).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label").repartition(64)
+    val indexedTest = indexerModel.transform(test).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label").repartition(64)
 
     val labelMap = indexedTrain.select("originalLabel", "label").distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
@@ -877,35 +884,56 @@ object Sampling {
     //val minLabel: Double = indexedTest.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble).min
     // val inputCols = test.columns.filter(_ != "label")
 
-    val t0 = System.nanoTime()
+    val labels: Array[Double] = labelMap.values.toArray.sorted
 
-    val cls = if(classifier == "svm") {
-      val lsvm = new LinearSVC()
-        .setMaxIter(100)
-        .setRegParam(cParam)
 
-      new OneVsRest().setClassifier(lsvm)
-    } else if(classifier == "nb") {
-      new NaiveBayes()
-    } else {
-    new RandomForestClassifier().setNumTrees(100).setMaxDepth(25).
-      setSeed(42L).
-      setLabelCol("label").
-      setFeaturesCol("features").
-      setPredictionCol("prediction")
+    var results = Array[Array[String]]()
+ // FIXME - Check parallelism
+    for(classifier<-classifiers) {
+      val t0 = System.nanoTime()
+      val cls = if(classifier == "svm") {
+        val lsvm = new LinearSVC()
+          .setMaxIter(100)
+          .setRegParam(10.0)
+
+        new OneVsRest().setClassifier(lsvm)
+      } else if(classifier == "nb") {
+        new NaiveBayes()
+      } else {
+        new RandomForestClassifier().setNumTrees(100).setMaxDepth(20).
+          setSeed(42L).
+          setLabelCol("label").
+          setFeaturesCol("features").
+          setPredictionCol("prediction")
+      }
+
+      indexedTrain.show
+      indexedTrain.printSchema()
+      println("^^^^^ num partitions:" + indexedTrain.rdd.getNumPartitions)
+
+      val model = cls.fit(indexedTrain)
+      val predictions: DataFrame = model.transform(indexedTest)
+
+      val t1 = System.nanoTime()
+      val classifierTime = (t1 - t0) / 1e9
+
+      predictions.show(100)
+      predictions.printSchema()
+
+      val confusionMatrix: Dataset[Row] = predictions.groupBy("label").
+        pivot("prediction", labels).
+        count().
+        na.fill(0.0).
+        orderBy("label")
+
+      println("cm")
+      confusionMatrix.printSchema()
+
+      results :+= Array(classifier) ++ calculateClassifierResults(indexedTest.select("label").distinct(), confusionMatrix, labels) ++ Array(classifierTime.toString)
+
     }
 
-    indexedTrain.show
-    indexedTrain.printSchema()
 
-    val model = cls.fit(indexedTrain)
-    val predictions: DataFrame = model.transform(indexedTest)
-
-    val t1 = System.nanoTime()
-    val classifierTime = (t1 - t0) / 1e9
-
-    predictions.show(100)
-    predictions.printSchema()
     //predictions.select("label", "prediction").write.format("csv").option("header", "false").save("/home/ford/tmp/predictions/")
 
     import org.apache.spark.ml.linalg.Vectors
@@ -931,19 +959,7 @@ object Sampling {
     println("Confusion matrix:")
     println(metrics.confusionMatrix)
     println(metrics)*/
-
-    val labels: Array[Double] = labelMap.values.toArray.sorted
-
-    val confusionMatrix: Dataset[Row] = predictions.groupBy("label").
-      pivot("prediction", labels).
-      count().
-      na.fill(0.0).
-      orderBy("label")
-
-    println("cm")
-    confusionMatrix.printSchema()
-
-    calculateClassifierResults(indexedTest.select("label").distinct(), confusionMatrix, labels) ++ Array(classifierTime.toString)
+    results
   }
 
 }

@@ -302,7 +302,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
+      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {

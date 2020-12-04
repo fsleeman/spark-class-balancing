@@ -50,6 +50,8 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
+    println("^^^ smote partitions: " + dataset.rdd.getNumPartitions)
+
     val knnModel: KNNModel = model.fit(dataset)
     val nearestNeighborDF = knnModel.transform(dataset)
 
@@ -90,7 +92,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
+      .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
   override def transformSchema(schema: StructType): StructType = {

@@ -154,7 +154,7 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
+      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {

@@ -277,7 +277,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
     ds.drop("index").withColumn("originalLabel", restoreLabel(ds.col($(labelCol)))).drop($(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol)).repartition(1)
+      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
   }
 
   override def transformSchema(schema: StructType): StructType = {
