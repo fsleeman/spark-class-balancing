@@ -43,7 +43,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val row = knnClusters(clusterId)(Random.nextInt(knnClusterCounts(clusterId)))
     val features = row(1).asInstanceOf[mutable.WrappedArray[DenseVector]]
     val aSample = features(0).toArray
-    val bSample = features(Random.nextInt($(k)) + 1).toArray
+    val bSample = features(Random.nextInt(Math.min(features.length, $(k) + 1))).toArray
     val offset = Random.nextDouble()
 
     Vectors.dense(Array(aSample, bSample).transpose.map(x=>x(0) + offset * (x(1)-x(0)))).toDense
@@ -88,7 +88,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x)).filter(x=>x.count()>0).toArray
 
     // knn for each cluster
-    knnClusters =  clusters.map(x=>calculateKnnByCluster(spark, x).select($(labelCol), "neighborFeatures").collect)
+    knnClusters = clusters.map(x=>calculateKnnByCluster(spark, x).select($(labelCol), "neighborFeatures").collect).filter(x=>x.length > 0)
     knnClusterCounts = knnClusters.map(x=>x.length)
 
     val randomIndicies = (0 until samplesToAdd).map(_ => Random.nextInt(clusters.length))
