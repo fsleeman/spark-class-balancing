@@ -494,6 +494,15 @@ object Sampling {
     val datasetSize = lines("datasetSize").trim
     val datasetPath = lines("datasetPath").trim
     val datasetName = lines("datasetName").trim
+
+    val singleSplitIndex = if(lines.contains("singeSplitIndex")) {
+      lines("singeSplitIndex").trim.toInt
+    } else{
+      -1
+    }
+    println("singe line split: " + singleSplitIndex)
+
+
     // val cParam = lines("c").trim
 
     val input_file = datasetPath + "/" + datasetName  + datasetSize + ".csv"
@@ -656,9 +665,10 @@ object Sampling {
 
     for(mt<-minorityTypeList) {
       for(splitIndex<-0 until numSplits) {
+
         println("splitIndex: " + splitIndex + " numSplits: " + numSplits)
         val datasets = if(numSplits == 1) {
-          getStratifiedSplit(clsFiltered, 5, 0)
+          getStratifiedSplit(clsFiltered, 5, singleSplitIndex)
         } else {
           getStratifiedSplit(clsFiltered, numSplits, splitIndex)
         }

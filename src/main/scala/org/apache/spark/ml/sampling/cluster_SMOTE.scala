@@ -85,13 +85,24 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val model = kMeans.fit(minorityDF)
     val predictions = model.transform(minorityDF)
 
-    val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x)).filter(x=>x.count()>0).toArray
+    val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x))
+      .filter(x=>x.count() > 0).toArray
 
     // knn for each cluster
     knnClusters = clusters.map(x=>calculateKnnByCluster(spark, x).select($(labelCol), "neighborFeatures").collect).filter(x=>x.length > 0)
     knnClusterCounts = knnClusters.map(x=>x.length)
 
-    val randomIndicies = (0 until samplesToAdd).map(_ => Random.nextInt(clusters.length))
+    /*println("Cluster counts: ")
+    for(x<-knnClusterCounts) {
+      println(x)
+    }
+
+    for(x<-knnClusters(4)) {
+      println(x.toString())
+    }*/
+
+
+    val randomIndicies = (0 until samplesToAdd).map(_ => Random.nextInt(knnClusters.length))
     val addedSamples = randomIndicies.map(x=>Row(minorityClassLabel, createSample(x))).toArray
 
     spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(addedSamples), dataset.schema)

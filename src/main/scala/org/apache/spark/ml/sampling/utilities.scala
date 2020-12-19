@@ -116,7 +116,7 @@ object utilities {
 
 
   def calculateToTreeSize(topTreeSize: Int, datasetCount: Long): Int ={
-    if(topTreeSize >= datasetCount.toInt) {
+    if(topTreeSize >= datasetCount.toInt || datasetCount.toInt < 100) {
       datasetCount.toInt
     } else {
       topTreeSize
