@@ -39,14 +39,21 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
   var knnClusters: Array[Array[Row]] = Array[Array[Row]]()
   var knnClusterCounts: Array[Int] = Array[Int]()
 
-  def createSample(clusterId: Int): DenseVector ={
+  def createSample(backupSamples: Array[Row], clusterId: Int): DenseVector ={
     val row = knnClusters(clusterId)(Random.nextInt(knnClusterCounts(clusterId)))
     val features = row(1).asInstanceOf[mutable.WrappedArray[DenseVector]]
-    val aSample = features(0).toArray
-    val bSample = features(Random.nextInt(Math.min(features.length, $(k) + 1))).toArray
-    val offset = Random.nextDouble()
+    // Randomly oversample if knn couldn't give valid results
+    if (features.length < ${k} + 1) {
+     // dataset.rdd.takeSample(withReplacement = false, 1)(0).asInstanceOf[Row](1).asInstanceOf[DenseVector]
+      // println("Random.nextInt(backupSamples.length): " + backupSamples.length)
+      backupSamples(Random.nextInt(backupSamples.length))(1).asInstanceOf[DenseVector]
+    } else {
+      val aSample = features(0).toArray
+      val bSample = features(Random.nextInt(Math.min(features.length, $(k) + 1))).toArray
+      val offset = Random.nextDouble()
 
-    Vectors.dense(Array(aSample, bSample).transpose.map(x=>x(0) + offset * (x(1)-x(0)))).toDense
+      Vectors.dense(Array(aSample, bSample).transpose.map(x=>x(0) + offset * (x(1)-x(0)))).toDense
+    }
   }
 
   def calculateKnnByCluster(spark: SparkSession, df: DataFrame): DataFrame ={
@@ -85,25 +92,21 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val model = kMeans.fit(minorityDF)
     val predictions = model.transform(minorityDF)
 
+
     val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x))
       .filter(x=>x.count() > 0).toArray
+    //val clusters = (0 until 1).map(x=>predictions.filter(predictions("prediction")===0))
+    //  .filter(x=>x.count() > 0).toArray
 
     // knn for each cluster
     knnClusters = clusters.map(x=>calculateKnnByCluster(spark, x).select($(labelCol), "neighborFeatures").collect).filter(x=>x.length > 0)
     knnClusterCounts = knnClusters.map(x=>x.length)
 
-    /*println("Cluster counts: ")
-    for(x<-knnClusterCounts) {
-      println(x)
-    }
-
-    for(x<-knnClusters(4)) {
-      println(x.toString())
-    }*/
-
+    // needed if there is an issue with knn, i.e. all examples are the same in a cluster
+    val backupSamples = dataset.sample(withReplacement = true, samplesToAdd / dataset.count().toDouble).collect().map(x=>x.asInstanceOf[Row])
 
     val randomIndicies = (0 until samplesToAdd).map(_ => Random.nextInt(knnClusters.length))
-    val addedSamples = randomIndicies.map(x=>Row(minorityClassLabel, createSample(x))).toArray
+    val addedSamples = randomIndicies.map(x=>Row(minorityClassLabel, createSample(backupSamples, x))).toArray
 
     spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(addedSamples), dataset.schema)
   }
@@ -128,8 +131,13 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
+    println("**** cls selected")
+    datasetSelected.filter(datasetSelected($(labelCol))===2.0).show
+
 
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
+    // val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+    //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
       .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 

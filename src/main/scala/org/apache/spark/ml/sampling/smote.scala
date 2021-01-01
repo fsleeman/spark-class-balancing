@@ -50,7 +50,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
-    println("^^^ smote partitions: " + dataset.rdd.getNumPartitions)
+    println("^^^ smote partitions: " + dataset.rdd.getNumPartitions + " dataset size: " + dataset.count())
 
     val knnModel: KNNModel = model.fit(dataset)
     val nearestNeighborDF = knnModel.transform(dataset)

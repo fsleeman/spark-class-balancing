@@ -434,19 +434,23 @@ object Sampling {
     val spark = df.sparkSession
     import spark.implicits._
 
-    val train_index = df.rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
+    val train_index = df.drop("index").rdd.zipWithIndex().map({ case (x, y) => (y, x) }).cache()
 
-    val data: RDD[(Long, String, Array[Double])] = train_index.map({ r =>
+    // val data: RDD[(Long, Double, Array[Double])] = train_index.map({ r =>
+    val data: RDD[(Long, Double, DenseVector)] = train_index.map({ r =>
       val array = r._2.toSeq.toArray.reverse
-      val cls = array.head.toString
-      val rowMapped: Array[Double] = array.tail.map(_.toString.toDouble)
+      val cls = array.head.toString.toDouble
+      val rowMapped = array.tail(0).asInstanceOf[DenseVector] // Array[Double]()// array.tail.map(_.toString.toDouble)
       //NOTE - This needs to be back in the original order to train/test works correctly
-      (r._1, cls, rowMapped.reverse)
+      (r._1, cls, rowMapped)
     })
 
-    data.toDF().withColumnRenamed("_1", "index")
+    val indexDF = data.toDF().withColumnRenamed("_1", "index")
       .withColumnRenamed("_2", "label")
       .withColumnRenamed("_3", "features")
+      //.withColumn("features", asDense($"featuresOrig")).drop("featuresOrig")
+
+    indexDF
   }
 
   def indexDF2(df: DataFrame): DataFrame ={
@@ -477,6 +481,14 @@ object Sampling {
       .withColumnRenamed("_3", "minorityType")
       .withColumnRenamed("_4", "features")
   }
+
+  val asDense = udf((v: Any) => {
+    if(v.isInstanceOf[SparseVector]) {
+      v.asInstanceOf[SparseVector].toDense
+    } else {
+      v.asInstanceOf[DenseVector]
+    }
+  })
 
 
   def main(args: Array[String]) {
@@ -544,13 +556,7 @@ object Sampling {
 
     val converted: DataFrame = convertFeaturesToVector(results)
 
-    val asDense = udf((v: Any) => {
-      if(v.isInstanceOf[SparseVector]) {
-        v.asInstanceOf[SparseVector].toDense
-      } else {
-        v.asInstanceOf[DenseVector]
-      }
-    })
+
 
     val scaledDataIn: DataFrame = if(enableDataScaling) {
       val scaler = new MinMaxScaler().setMin(0.0).setMax(1.0)
@@ -589,13 +595,14 @@ object Sampling {
 
 
     val counts = scaledData.count()
-    var splits = Array[Int]()
+    // var splits = Array[Int]()
     println("scaled data")
+    println(scaledData.count)
     scaledData.show()
     scaledData.printSchema()
 
     // splits :+= 2
-    splits :+= 0
+    /*splits :+= 0
 
     if(numSplits < 2) {
       splits :+= (counts * 0.2).toInt
@@ -605,7 +612,7 @@ object Sampling {
         splits :+= ((counts / numSplits) * i).toInt
       }
     }
-    splits :+= counts.toInt
+    splits :+= counts.toInt*/
 
     var combinedSplitResults =  Array[Array[String]]()
 
@@ -614,30 +621,37 @@ object Sampling {
     val countsBy = getCountsByClass("label", scaledData)
     countsBy.show
     val labelList = countsBy.select("_1").collect().map(x=>x(0).toString.toDouble)
+    for(x<-labelList) {
+      println(x)
+    }
 
     val clsFiltered = labelList.map(x=>scaledData.filter(scaledData("label")===x))//.drop("index"))//.map(x=>indexDF2(x))
 
-    /*for(x<-clsFiltered) {
-      println(x._1 + " " + x._2.count())
-    }*/
+    println("*counts")
+    for(x<-clsFiltered) {
+      println(x.count())
+    }
 
     def getStratifiedSplit(dfs: Array[DataFrame], totalSplits: Int, splitIndex: Int, minorityType: String = ""): (DataFrame, DataFrame) ={
-      val splitIndexLow = (splitIndex)/ totalSplits.toDouble
-      val splitIndexHigh = (splitIndex + 1)/ totalSplits.toDouble
-      val testFiltered = dfs.map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow)) // .drop("index"))
+      val splitIndexLow = splitIndex / totalSplits.toDouble
+      val splitIndexHigh = (splitIndex + 1) / totalSplits.toDouble
+
+      // val testFiltered = dfs.map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow)) //.map(x=>indexDF(x))
+      val testFiltered = dfs.map(x=>indexDF(x)).map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow)) //.map(x=>indexDF(x))
       val testDF = testFiltered.reduce(_ union _)
 
-      val trainFiltered = dfs.map(x=>x.filter(x("index") >= x.count() * splitIndexHigh || x("index") < x.count() * splitIndexLow))
-      val trainDF = if(minorityType == "" | minorityType == "SBRO") {
-        trainFiltered.reduce(_ union _)
-      } else {
-        filterByMinorityType(trainFiltered.reduce(_ union _), minorityType)
-      }
-      println("train")
-      getCountsByClass("label", trainDF).show()
-      println("test")
-      getCountsByClass("label", testDF).show()
+      // val trainFiltered = dfs.map(x=>x.filter(x("index") >= x.count() * splitIndexHigh || x("index") < x.count() * splitIndexLow)) // .map(x=>indexDF(x))
+      val trainFiltered = dfs.map(x=>indexDF(x)).map(x=>x.filter(x("index") >= x.count() * splitIndexHigh || x("index") < x.count() * splitIndexLow)) // .map(x=>indexDF(x))
+      val trainDF = trainFiltered.reduce(_ union _)
 
+      println("*train")
+      getCountsByClass("label", trainDF).show()
+      println(trainDF.count())
+      trainDF.printSchema()
+
+      println("*test")
+      getCountsByClass("label", testDF).show()
+      println(testDF.count())
 
       (trainDF, testDF)
     }
@@ -675,12 +689,18 @@ object Sampling {
         val trainData = datasets._1
         val testData = datasets._2
 
+
+
         //val testData = scaledData.filter(scaledData("index") < splits(splitIndex + 1) && scaledData("index") >= splits(splitIndex)).persist()
         //val trainData = filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), mt).persist()//scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)).persist() //filterByMinorityType(scaledData.filter(scaledData("index") >= splits(splitIndex + 1) || scaledData("index") < splits(splitIndex)), "SBRO").persist()
         println("trainSchema")
         trainData.printSchema()
 
+        println("train")
         getCountsByClass("label", trainData).show(100)
+
+        println("test")
+        getCountsByClass("label", testData).show(100)
 
         println("original size: " + trainData.count())
 
@@ -692,14 +712,6 @@ object Sampling {
             "5" -> 2.0,
             "6" -> 2.0,
             "7" -> 2.0
-
-          /*Map( "none" -> 1.0,
-            "rRna" -> 10.0,
-            "tRna" -> 20.0,
-            "snRna" -> 20.0,
-            "mRna" -> 40.0,
-            "SRP" -> 40.0,
-            "IRES" -> 40.0*/
           )
 
       // FIXME - make per class map parallel to run faster
@@ -730,11 +742,11 @@ object Sampling {
            model.transform(trainData)
          } else if(samplingMethod == "smote") {
            val r = new SMOTE
-           val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)   //.setSamplingRatios(samplingMap)
+           val model = r.fit(trainData).setBalanceThreshold(0.0)//.setTopTreeSize(2)   //.setSamplingRatios(samplingMap)
            model.transform(trainData)
          } else if(samplingMethod == "mwmote") {
            val r = new MWMOTE()
-           val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)
+           val model = r.fit(trainData).setBalanceThreshold(0.0)//.setTopTreeSize(2)
            model.transform(trainData)
          } else if(samplingMethod == "ccr") {
            val r = new CCR().setEnergy(1.0)
@@ -746,7 +758,7 @@ object Sampling {
            model.transform(trainData)
          } else if(samplingMethod == "clusterSmote") {
            val r = new ClusterSMOTE()
-           val model = r.fit(trainData).setBalanceThreshold(0.0).setTopTreeSize(2)
+           val model = r.fit(trainData).setBalanceThreshold(0.0)//.setTopTreeSize(2)
            model.transform(trainData)
          } else if(samplingMethod == "gaussianSmote") {
            val r = new GaussianSMOTE()
@@ -888,6 +900,8 @@ object Sampling {
 
     println("^^ runClassifierMinorityType")
     println(labelMapReversed)
+
+    train.show()
     //val spark = train.sparkSession
     //FIXME - don't collect twice
     //val maxLabel: Double = indexedTest.select("label").distinct().collect().map(x => x.toSeq.last.toString.toDouble).max
