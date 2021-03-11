@@ -112,7 +112,9 @@ class KMeansSMOTEModel private[ml](override val uid: String) extends Model[KMean
 
     val imbalancedRatios: Array[Double] = clusters.map(x=>getImbalancedRatio(spark, x, minorityClassLabel))
 
-    val filteredClusters = (0 until $(clusterK)).map(x=>(imbalancedRatios(x), clusters(x))).filter(x=>x._1 < $(imbalanceRatioThreshold)).map(x=>x._2).map(x=>x.filter(x($(labelCol))===minorityClassLabel))
+    val filteredClusters = (0 until $(clusterK)).map(x=>(imbalancedRatios(x), clusters(x)))
+      .filter(x=>x._1 < $(imbalanceRatioThreshold)).map(x=>x._2).map(x=>x.filter(x($(labelCol))===minorityClassLabel))
+      .filter(x=>x.count() > 0)
 
     val averageDistances = filteredClusters.indices.map(x=>getAverageDistance(filteredClusters(x))).toArray
 

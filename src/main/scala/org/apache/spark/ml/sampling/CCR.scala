@@ -9,10 +9,12 @@ import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{col, desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+
 
 import scala.collection.mutable
 
@@ -154,6 +156,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val spark = dataset.sparkSession
     import spark.implicits._
 
+    println("minorityClassLabel: " + minorityClassLabel)
     val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
     val majorityDF = dataset.filter(dataset($(labelCol)) =!= minorityClassLabel)
 
@@ -193,58 +196,74 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     })
 
     val inverseRi = result.withColumn("riInverted", invertRi($"ri"))
-    val inverseRiSum = inverseRi.select("riInverted").rdd.map(x=>x(0).toString.toDouble).reduce(_ + _)
 
-    val resultWithSampleCount = inverseRi.withColumn("gi", $"riInverted"/ inverseRiSum)
+    //val inverseRiSum = inverseRi.select("riInverted").rdd.map(x=>x(0).toString.toDouble).reduce(_ + _)
 
-    val giSum = resultWithSampleCount.select("gi").rdd.map(x=>x(0).toString.toDouble).reduce(_ + _)
+    val X: RDD[Double] = inverseRi.select("riInverted").rdd.map(x=>x(0).toString.toDouble)
+    for(line <- X.collect()) {
+      println("*" + line)
+    }
+    println("X length: " + X.count())
 
-    val resulsWithSamplesToAdd = resultWithSampleCount.withColumn("samplesToAdd", ($"gi"/ giSum) * samplesToAdd).sort(col("samplesToAdd").desc)
+    if(X.count() == 0) { // random oversample
+      val foo = dataset.sample(withReplacement = true, (dataset.count + samplesToAdd) / dataset.count.toDouble)
 
-    // FIXME - should the sampling rate be proportional of gi?
-    val createdPoints: Array[Array[Row]] = resulsWithSamplesToAdd.drop("index", "distances", "majorityIndex",
-      "majorityLabel", "majorityFeatures", "riInverted", "gi").collect().map(x=>createSyntheicPoints(x))
+      println("~~~ 0 size count: " + foo.count())
+      foo
+    } else {
+      val inverseRiSum = X.reduce(_ + _)
 
-    val unionedPoints = createdPoints.reduce(_ union _).take(samplesToAdd)
+      val resultWithSampleCount = inverseRi.withColumn("gi", $"riInverted" / inverseRiSum)
 
-    val movedPoints = resultWithSampleCount.withColumn("movedMajorityPoints",
-      moveMajorityPoints2($"features",  $"majorityIndex",  $"majorityLabel", $"majorityFeatures", $"distances", $"ri"))
+      val giSum = resultWithSampleCount.select("gi").rdd.map(x => x(0).toString.toDouble).reduce(_ + _)
 
-    val movedPointsExpanded = movedPoints.withColumn("movedMajorityIndex", $"movedMajorityPoints._1")
-      .withColumn("movedMajorityLabel", $"movedMajorityPoints._2")
-      .withColumn("movedMajorityExamples", $"movedMajorityPoints._3")
-      .drop("movedMajorityPoints")
+      val resulsWithSamplesToAdd = resultWithSampleCount.withColumn("samplesToAdd", ($"gi" / giSum) * samplesToAdd).sort(col("samplesToAdd").desc)
 
-    val movedPointsSelected = movedPointsExpanded.select("movedMajorityIndex", "movedMajorityLabel", "movedMajorityExamples")
-    val movedPointsCollected = movedPointsSelected.collect()
+      // FIXME - should the sampling rate be proportional of gi?
+      val createdPoints: Array[Array[Row]] = resulsWithSamplesToAdd.drop("index", "distances", "majorityIndex",
+        "majorityLabel", "majorityFeatures", "riInverted", "gi").collect().map(x => createSyntheicPoints(x))
 
-    val fooX: Array[(Array[Long], Array[Double], Array[Array[Double]])] = movedPointsCollected.map(x=>(x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray,
-      x(1).asInstanceOf[mutable.WrappedArray[Double]].toArray,
-      x(2).asInstanceOf[mutable.WrappedArray[mutable.WrappedArray[Double]]].toArray.map(y=>y.toArray)))
+      val unionedPoints = createdPoints.reduce(_ union _).take(samplesToAdd)
 
-    val results = fooX.map(x=>extractMovedPoints(x._1, x._2, x._3))
+      val movedPoints = resultWithSampleCount.withColumn("movedMajorityPoints",
+        moveMajorityPoints2($"features", $"majorityIndex", $"majorityLabel", $"majorityFeatures", $"distances", $"ri"))
 
-    val total: Array[Row] = results.reduce(_ union _)
+      val movedPointsExpanded = movedPoints.withColumn("movedMajorityIndex", $"movedMajorityPoints._1")
+        .withColumn("movedMajorityLabel", $"movedMajorityPoints._2")
+        .withColumn("movedMajorityExamples", $"movedMajorityPoints._3")
+        .drop("movedMajorityPoints")
 
-    val grouped: Map[Long, Array[Row]] = total groupBy (s => s(0).toString.toLong)
+      val movedPointsSelected = movedPointsExpanded.select("movedMajorityIndex", "movedMajorityLabel", "movedMajorityExamples")
+      val movedPointsCollected = movedPointsSelected.collect()
 
-    val averaged: Array[Row] = grouped.map(x=>getAveragedRow(x._2)).toArray
-    val movedMajorityIndicies = averaged.map(x=>x(0).toString.toLong).toList
+      val fooX: Array[(Array[Long], Array[Double], Array[Array[Double]])] = movedPointsCollected.map(x => (x(0).asInstanceOf[mutable.WrappedArray[Long]].toArray,
+        x(1).asInstanceOf[mutable.WrappedArray[Double]].toArray,
+        x(2).asInstanceOf[mutable.WrappedArray[mutable.WrappedArray[Double]]].toArray.map(y => y.toArray)))
 
-    val movedMajorityExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(averaged.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF()
-      .withColumnRenamed("_1","index")
-      .withColumnRenamed("_2",$(labelCol))
-      .withColumnRenamed("_3",$(featuresCol))
+      val results = fooX.map(x => extractMovedPoints(x._1, x._2, x._3))
 
-    val syntheticExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(unionedPoints.map(x=>(x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF()
-      .withColumnRenamed("_1","index")
-      .withColumnRenamed("_2",$(labelCol))
-      .withColumnRenamed("_3",$(featuresCol))
+      val total: Array[Row] = results.reduce(_ union _)
 
-    val keptMajorityDF = dataset.filter(!$"index".isin(movedMajorityIndicies: _*))
-    val finalDF = keptMajorityDF.union(movedMajorityExamplesDF).union(syntheticExamplesDF)
+      val grouped: Map[Long, Array[Row]] = total groupBy (s => s(0).toString.toLong)
 
-    finalDF
+      val averaged: Array[Row] = grouped.map(x => getAveragedRow(x._2)).toArray
+      val movedMajorityIndicies = averaged.map(x => x(0).toString.toLong).toList
+
+      val movedMajorityExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(averaged.map(x => (x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF()
+        .withColumnRenamed("_1", "index")
+        .withColumnRenamed("_2", $(labelCol))
+        .withColumnRenamed("_3", $(featuresCol))
+
+      val syntheticExamplesDF = spark.createDataFrame(spark.sparkContext.parallelize(unionedPoints.map(x => (x(0).toString.toLong, x(1).toString.toDouble, x(2).asInstanceOf[DenseVector])))).toDF()
+        .withColumnRenamed("_1", "index")
+        .withColumnRenamed("_2", $(labelCol))
+        .withColumnRenamed("_3", $(featuresCol))
+
+      val keptMajorityDF = dataset.filter(!$"index".isin(movedMajorityIndicies: _*))
+      val finalDF = keptMajorityDF.union(movedMajorityExamplesDF).union(syntheticExamplesDF)
+
+      finalDF
+    }
   }
 
   val checkForNegatives: UserDefinedFunction = udf((features: DenseVector) => {
@@ -286,6 +305,9 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     var ds = datasetSelected
     for(minorityClass<-minorityClasses) {
       ds = oversample(ds, minorityClass._1, majorityClassCount - minorityClass._2)
+
+      println("@@@@ counts after " + minorityClass._1)
+      getCountsByClass(ds.sparkSession, $(labelCol), ds).show(100)
     }
 
     ds = removeNegatives(ds)

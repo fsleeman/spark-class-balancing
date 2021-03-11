@@ -50,6 +50,19 @@ object Sampling {
     println("")
   }
 
+  def getConfusionMatrix(cm: Array[Array[Double]]): String ={
+    var result = ""
+    for(row<-cm) {
+      for(index<-row.indices) {
+        result += row(index)
+        if(index < row.length - 1) {
+          result += ","
+        }
+      }
+      result += "\n"
+    }
+    result
+  }
 
   def calculateClassifierResults(distinctClasses: DataFrame, confusionMatrix: DataFrame, labels: Array[Double]): Array[String]={
 
@@ -75,9 +88,9 @@ object Sampling {
     // val labels = Array(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
     val classMaps = rows.indices.map(x=>(rows(x).head, x)).toMap
     println(classMaps)
-    for(x<-classMaps) {
+    //for(x<-classMaps) {
   //    println(x._1, x._2)
-    }
+   // }
 
     var updatedRows = Array[Array[Double]]()
     for(x<-labels.indices) {
@@ -101,7 +114,11 @@ object Sampling {
       printArray(x)
     }
 
-    println("****")
+    /*println("****")
+
+    println("~~ printing cm")
+    print(getConfusionMatrix(updatedRows))
+    println("~~")*/
 
     val totalCount = updatedRows.map(x => x.tail.sum).sum
     // val classMaps: Array[(Int, Double)] = testLabels.zipWithIndex.map(x => (x._2, x._1))
@@ -507,11 +524,19 @@ object Sampling {
     val datasetPath = lines("datasetPath").trim
     val datasetName = lines("datasetName").trim
 
-    val singleSplitIndex = if(lines.contains("singeSplitIndex")) {
-      lines("singeSplitIndex").trim.toInt
+    val singleSplitIndex = if(lines.contains("singleSplitIndex")) {
+      lines("singleSplitIndex").trim.toInt
     } else{
       -1
     }
+
+    if(lines.contains("foo")) {
+      println("found foo")
+    } else{
+      println("did not find foo")
+    }
+
+
     println("singe line split: " + singleSplitIndex)
 
 
@@ -594,7 +619,7 @@ object Sampling {
 
 
 
-    val counts = scaledData.count()
+    // val counts = scaledData.count()
     // var splits = Array[Int]()
     println("scaled data")
     println(scaledData.count)
@@ -636,6 +661,10 @@ object Sampling {
       val splitIndexLow = splitIndex / totalSplits.toDouble
       val splitIndexHigh = (splitIndex + 1) / totalSplits.toDouble
 
+      println("*** split index ***")
+      println(splitIndex + " "  + totalSplits.toDouble)
+      println("******")
+
       // val testFiltered = dfs.map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow)) //.map(x=>indexDF(x))
       val testFiltered = dfs.map(x=>indexDF(x)).map(x => x.filter(x("index") < x.count() * splitIndexHigh && x("index") >= x.count() * splitIndexLow)) //.map(x=>indexDF(x))
       val testDF = testFiltered.reduce(_ union _)
@@ -650,8 +679,23 @@ object Sampling {
       trainDF.printSchema()
 
       println("*test")
-      getCountsByClass("label", testDF).show()
+      getCountsByClass("label", testDF).sort(asc("_1")).show(100)
       println(testDF.count())
+
+
+
+      val testX: Array[DataFrame] = dfs.map(x=>indexDF(x))
+
+      println("~~~~ class data")
+      testX(0).show(100)
+      println(splitIndexLow + " " + splitIndexHigh)
+      testFiltered(0).show(100)
+
+
+      println("~~~~ end class data")
+
+
+
 
       (trainDF, testDF)
     }
@@ -704,7 +748,7 @@ object Sampling {
 
         println("original size: " + trainData.count())
 
-        val samplingMap: Map[String, Double] =
+        /*val samplingMap: Map[String, Double] =
           Map( "1" -> 2.0,
             "2" -> 0.5,
             "3" -> 2.0,
@@ -712,7 +756,7 @@ object Sampling {
             "5" -> 2.0,
             "6" -> 2.0,
             "7" -> 2.0
-          )
+          )*/
 
       // FIXME - make per class map parallel to run faster
 
@@ -884,16 +928,13 @@ object Sampling {
   }
 
   def runClassifierMinorityType(classifiers: Array[String], train: DataFrame, test: DataFrame): Array[Array[String]] ={
-
-    import train.sparkSession.implicits._
     val indexer = new StringIndexer()
       .setInputCol("label")
       .setOutputCol("labelIndexed")
 
-
     val indexerModel = indexer.fit(train)
-    val indexedTrain = indexerModel.transform(train).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label").repartition(64)
-    val indexedTest = indexerModel.transform(test).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label").repartition(64)
+    val indexedTrain = indexerModel.transform(train).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label").repartition(32)
+    val indexedTest = indexerModel.transform(test).withColumnRenamed("label", "originalLabel").withColumnRenamed("labelIndexed", "label").repartition(32)
 
     val labelMap = indexedTrain.select("originalLabel", "label").distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
@@ -936,6 +977,7 @@ object Sampling {
       println("^^^^^ num partitions:" + indexedTrain.rdd.getNumPartitions)
 
       val model = cls.fit(indexedTrain)
+      println("model: " + model.uid)
       val predictions: DataFrame = model.transform(indexedTest)
 
       val t1 = System.nanoTime()
@@ -943,6 +985,7 @@ object Sampling {
 
       predictions.show(100)
       predictions.printSchema()
+      println("prediction partitions: " + predictions.rdd.getNumPartitions)
 
       val confusionMatrix: Dataset[Row] = predictions.groupBy("label").
         pivot("prediction", labels).
