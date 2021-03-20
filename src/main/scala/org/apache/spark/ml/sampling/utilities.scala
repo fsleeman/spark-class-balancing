@@ -3,13 +3,15 @@ package org.apache.spark.ml.sampling
 import org.apache.spark.ml.Model
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.KNN
-import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.HasFeaturesCol
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN}
 import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.functions.{count, udf}
 import org.apache.spark.sql.types._
+import scala.util.Random
+
 
 object utilities {
 
@@ -171,5 +173,10 @@ object utilities {
   }
 
   val toDense = udf((v: org.apache.spark.ml.linalg.Vector) => v.toDense)
+
+  def createSmoteStyleExample(features: DenseVector, randomNeighbor: DenseVector): DenseVector ={
+    val gap = Random.nextDouble()
+    Vectors.dense(Array(features.toArray, randomNeighbor.toArray).transpose.map(x=>x(0) + gap * (x(1) - x(0)))).toDense
+  }
 
 }
