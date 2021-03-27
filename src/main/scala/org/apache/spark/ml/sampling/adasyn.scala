@@ -28,35 +28,29 @@ private[ml] trait ADASYNModelParams extends Params with HasFeaturesCol with HasL
 class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNModel] with ADASYNModelParams {
   def this() = this(Identifiable.randomUID("adasyn"))
 
+  def isMajorityNeighbor(x1: String, x2: String): Int = {
+    if (x1 == x2) {
+      0
+    } else {
+      1
+    }
+  }
+
   def generateExamples(row: Row): Array[Row] = {
     val label = row(0).toString.toDouble
     val examplesToCreate = row(4).asInstanceOf[Long].toInt
     val neighborLabels = row(5).asInstanceOf[mutable.WrappedArray[Double]]
     val neighborFeatures: mutable.Seq[DenseVector] = row(6).asInstanceOf[mutable.WrappedArray[DenseVector]]
 
-    if (neighborLabels.tail.contains(label)) {
-      // skip self instance
-      var minorityIndicies = Array[Int]()
-      for (x <- 1 until neighborLabels.length) {
-        if (neighborLabels(x) == label) {
-          minorityIndicies = minorityIndicies :+ x
-        }
+    var minorityIndicies = Array[Int]()
+    for (x <- 1 until neighborLabels.length) {
+      if (neighborLabels(x) == label) {
+        minorityIndicies = minorityIndicies :+ x
       }
-
-      val randomIndicies = (0 until examplesToCreate).map(_ => minorityIndicies.toVector(Random.nextInt(minorityIndicies.length)))
-      // (0 until examplesToCreate).map(x => Row(label, neighborFeatures(randomIndicies(x)))).toArray
-      print("** neighbor length: " + neighborFeatures.length + " ")
-      for(x<-randomIndicies){
-        print(x + " ")
-      }
-      println("**")
-      //randomIndicies.map(x => Row(label, createSmoteStyleExample(neighborFeatures.head, neighborFeatures(randomIndicies(x))))).toArray
-      randomIndicies.map(x => Row(label, createSmoteStyleExample(neighborFeatures.head, neighborFeatures(x)))).toArray
-    } else {
-      // just in case we end up here
-      val features: Array[Double] = neighborFeatures.head.toArray
-      (0 until examplesToCreate).map(_ => Row(label, Vectors.dense(features).toDense)).toArray
     }
+
+    val randomIndicies = (0 until examplesToCreate).map(_ => minorityIndicies.toVector(Random.nextInt(minorityIndicies.length)))
+    randomIndicies.map(x => Row(label, createSmoteStyleExample(neighborFeatures.head, neighborFeatures(x)))).toArray
   }
 
   def oversample(dataset: Dataset[_], minorityClassLabel: Double, samplesToAdd: Int): DataFrame = {
@@ -74,30 +68,27 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
-    val fitModel: KNNModel = model.fit(dataset).setDistanceCol("distances")
+    val fitModel: KNNModel = model.fit(dataset)
     val minorityDataNeighbors = fitModel.transform(minorityDF)
     println("*** neighbors")
-    minorityDataNeighbors.show()
 
     val getMajorityNeighborRatio = udf((array: mutable.WrappedArray[String]) => {
-      def isMajorityNeighbor(x1: String, x2: String): Int = {
-        if (x1 == x2) {
-          0
-        } else {
-          1
-        }
-      }
       array.tail.map(x => isMajorityNeighbor(array.head, x)).sum / $(k).toFloat
     })
 
-    val dfNeighborRatio = minorityDataNeighbors.withColumn("neighborClassRatio", getMajorityNeighborRatio($"neighbors.label")).drop("distances")
-    val neighborRatioSum = dfNeighborRatio.agg(sum("neighborClassRatio")).first.get(0).toString.toDouble
+    val dfNeighborRatio = minorityDataNeighbors.withColumn("neighborClassRatio", getMajorityNeighborRatio($"neighbors.label")).filter(col("neighborClassRatio") < 1.0)
+    dfNeighborRatio.select("label", "neighborClassRatio").show()
 
+    val neighborRatioSum = dfNeighborRatio.agg(sum("neighborClassRatio")).first.get(0).toString.toDouble
+    println("ratio sum: " + neighborRatioSum)
     val getSampleCount = udf((density: Double) => {
       Math.round(density / neighborRatioSum * G.toDouble)
     })
 
-    val adjustedRatios = dfNeighborRatio.withColumn("samplesToAdd", getSampleCount($"neighborClassRatio")).withColumn("labels", $"neighbors.label").withColumn("neighborFeatures", $"neighbors.features")
+    val adjustedRatios = dfNeighborRatio.withColumn("samplesToAdd",
+      getSampleCount($"neighborClassRatio")).withColumn("labels", $"neighbors.label")
+      .withColumn("neighborFeatures", $"neighbors.features")
+
     println("*** adjusted")
     adjustedRatios.show()
     val syntheticExamples: Array[Array[Row]] = adjustedRatios.collect.map(x => generateExamples(x))
@@ -129,7 +120,7 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
 
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
-    //val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
+    // val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
     //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected))
@@ -139,7 +130,7 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
+      .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
   override def transformSchema(schema: StructType): StructType = {
