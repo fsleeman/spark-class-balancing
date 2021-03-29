@@ -5,7 +5,7 @@ import java.io.File
 
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.classification.{LinearSVC, NaiveBayes, OneVsRest, RandomForestClassifier}
-import org.apache.spark.ml.feature.MinMaxScaler
+import org.apache.spark.ml.feature.{IndexToString, MinMaxScaler, StringIndexer}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.functions._
@@ -13,7 +13,6 @@ import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.ml.linalg.SparseVector
 
 import scala.io.Source
-import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.mllib.evaluation.MulticlassMetrics
 import org.apache.spark.ml.sampling.utilities.{convertFeaturesToVector, getCountsByClass}
@@ -475,13 +474,17 @@ object Sampling {
       converted
     }.cache()
 
-
+    scaledDataIn.show()
     val indexer = new StringIndexer()
       .setInputCol("label")
       .setOutputCol("labelIndexed")
 
-    val datasetIndexed = indexer.fit(scaledDataIn).transform(scaledDataIn).drop("label")
+
+    val indexerModel = indexer.fit(scaledDataIn)
+    val datasetIndexed = indexerModel.transform(scaledDataIn).drop("label")
       .withColumnRenamed("labelIndexed", "label")
+
+
 
     val trainData = datasetIndexed
 
@@ -558,10 +561,11 @@ object Sampling {
 
       val sampledCounts = getCountsByClass("label", sampledData)
       sampledCounts.show
+      sampledCounts.printSchema()
       // sampledData.show
 
       def vecToArray(row: Row): Array[Double] ={
-        row(1).asInstanceOf[DenseVector].toArray ++ Array(row(2).asInstanceOf[Double]).slice(0, 1)
+        row(1).asInstanceOf[DenseVector].toArray ++ Array(row(2).toString.toDouble)//.asInstanceOf[Double])
       }
 
       val featuresDF = sampledData//.select("features")
@@ -583,6 +587,51 @@ object Sampling {
       val result = featuresDF.sparkSession.createDataFrame(d, schema)
       result.show
 
+      // println(indexerModel.labelsArray)
+      for(x<-indexerModel.labelsArray) {
+        for(y<-x) {
+          print(y + " " )
+        }
+        println()
+      }
+
+      val df = spark.createDataFrame(Seq(
+        (0.0, "a"),
+        (1.0, "b"),
+        (2.0, "c"),
+        (3.0, "a"),
+        (4.0, "a"),
+        (5.0, "c")
+      )).toDF("category", "label")
+
+      val indexer = new StringIndexer()
+        .setInputCol("label")
+        .setOutputCol("labelIndex")
+        .fit(df)
+      val indexed = indexer.transform(df)
+
+      println(s"Transformed string column '${indexer.getInputCol}' " +
+        s"to indexed column '${indexer.getOutputCol}'")
+      indexed.show()
+
+
+      val temp = indexed.drop(col("label")).withColumn("label", col("labelIndex"))
+      temp.show
+
+      val converter = new IndexToString()
+        .setInputCol("label")
+        .setOutputCol("label2")
+
+      val converted = converter.transform(temp)
+      converted.show
+
+
+
+      result.repartition(1).
+        write.format("com.databricks.spark.csv").
+        option("header", "true").
+        mode("overwrite").
+        save("/tmp/data")
 
       //
       //val data = Seq(("Java", "20000"), ("Python", "100000"), ("Scala", "3000"))

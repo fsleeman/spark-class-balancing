@@ -76,6 +76,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
+    println(labelMapReversed)
 
     val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
     val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
@@ -88,7 +89,15 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
       .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val oversampledOnly = false
+
+    val balanecedDF = if(oversampledOnly) {
+       datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    } else {
+      clsDFs.reduce(_ union _)
+    }
+
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
