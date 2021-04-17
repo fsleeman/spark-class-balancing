@@ -11,14 +11,14 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.ml.linalg.SparseVector
-
+import org.apache.spark.ml.attribute.Attribute
 import scala.io.Source
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.mllib.evaluation.MulticlassMetrics
 import org.apache.spark.ml.sampling.utilities.{convertFeaturesToVector, getCountsByClass}
 import org.apache.spark.sql.functions._
 import org.apache.spark.ml._
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{DoubleType, StructType}
 
 import scala.collection.mutable
 //FIXME - turn classes back to Ints instead of Doubles
@@ -562,14 +562,79 @@ object Sampling {
       val sampledCounts = getCountsByClass("label", sampledData)
       sampledCounts.show
       sampledCounts.printSchema()
-      // sampledData.show
+
+      sampledData.show
+      sampledData.printSchema()
+
+
+
+      // println(indexerModel.labelsArray)
+      /*for(x<-indexerModel.labelsArray) {
+        for(y<-x) {
+          print(y + " " )
+        }
+        println()
+      }*/
+
+      /*val df = spark.createDataFrame(Seq(
+        (0.0, "a"),
+        (1.0, "b"),
+        (2.0, "c"),
+        (3.0, "a"),
+        (4.0, "a"),
+        (5.0, "c")
+      )).toDF("category", "label")
+      print("** original")
+      df.show
+
+      val indexer = new StringIndexer()
+        .setInputCol("label")
+        .setOutputCol("labelIndex")
+        .fit(df)
+      val indexed = indexer.transform(df)
+
+      println(s"Transformed string column '${indexer.getInputCol}' " +
+        s"to indexed column '${indexer.getOutputCol}'")
+      println("*** indexed")
+      indexed.show()
+
+
+      val temp = indexed.drop(col("label")).withColumn("label", col("labelIndex")).drop("labelIndex")
+      println("*** temp")
+      temp.show
+
+      val converter = new IndexToString()
+        .setInputCol("label")
+        .setOutputCol("label2")
+
+      val converted = converter.transform(temp).drop("label").withColumn("label", col("label2")).drop("label2")
+      println("*** converted")
+      converted.show*/
+    import spark.implicits._
+      import org.apache.spark.sql.types._
+    val foo = sampledData.withColumn("label2", $"label".cast("double")).drop("label").withColumn("label", col("label2")).drop("label2")
+      foo.show()
+    foo.printSchema()
+      println("************************")
+      println(foo.take(1)(0))
+      val converter2 = new IndexToString()
+        .setInputCol("label")
+        .setOutputCol("label2")
+
+      // val converted2 = converter2.transform(foo).drop("label").withColumn("label", col("label2")).drop("label2")
+      val convertedX = converter2.transform(foo)//.drop("label").withColumn("label", col("label2")).drop("label2")
+     println("*** converted")
+     convertedX.show
+     val converted2 = sampledData
 
       def vecToArray(row: Row): Array[Double] ={
-        row(1).asInstanceOf[DenseVector].toArray ++ Array(row(2).toString.toDouble)//.asInstanceOf[Double])
+        row(0).asInstanceOf[DenseVector].toArray ++ Array(row(1).toString.toDouble)//.asInstanceOf[Double])
       }
 
-      val featuresDF = sampledData//.select("features")
+      val featuresDF = converted2//.select("features")
       featuresDF.show
+      featuresDF.printSchema()
+      println(featuresDF.take(1)(0))
       val collected = featuresDF.collect().map(x=>vecToArray(x))
       val rows: Array[Row] = collected.map{ x => Row(x:_*)}
       println(rows(0))
@@ -587,51 +652,12 @@ object Sampling {
       val result = featuresDF.sparkSession.createDataFrame(d, schema)
       result.show
 
-      // println(indexerModel.labelsArray)
-      for(x<-indexerModel.labelsArray) {
-        for(y<-x) {
-          print(y + " " )
-        }
-        println()
-      }
-
-      val df = spark.createDataFrame(Seq(
-        (0.0, "a"),
-        (1.0, "b"),
-        (2.0, "c"),
-        (3.0, "a"),
-        (4.0, "a"),
-        (5.0, "c")
-      )).toDF("category", "label")
-
-      val indexer = new StringIndexer()
-        .setInputCol("label")
-        .setOutputCol("labelIndex")
-        .fit(df)
-      val indexed = indexer.transform(df)
-
-      println(s"Transformed string column '${indexer.getInputCol}' " +
-        s"to indexed column '${indexer.getOutputCol}'")
-      indexed.show()
-
-
-      val temp = indexed.drop(col("label")).withColumn("label", col("labelIndex"))
-      temp.show
-
-      val converter = new IndexToString()
-        .setInputCol("label")
-        .setOutputCol("label2")
-
-      val converted = converter.transform(temp)
-      converted.show
-
-
-
+    println("save path: " + savePath)
       result.repartition(1).
         write.format("com.databricks.spark.csv").
         option("header", "true").
         mode("overwrite").
-        save("/tmp/data")
+        save(savePath)
 
       //
       //val data = Seq(("Java", "20000"), ("Python", "100000"), ("Scala", "3000"))

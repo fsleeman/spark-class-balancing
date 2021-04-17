@@ -91,6 +91,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
 
     val oversampledOnly = false
 
+    // reverse?
     val balanecedDF = if(oversampledOnly) {
        datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
     } else {
@@ -100,7 +101,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop($(labelCol))
       .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
