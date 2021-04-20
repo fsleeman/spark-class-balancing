@@ -136,16 +136,20 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
 
 
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
-    // val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
-    //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
+
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
       .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val balancedDF = if($(oversamplesOnly)) {
+      clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    }
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
   override def transformSchema(schema: StructType): StructType = {

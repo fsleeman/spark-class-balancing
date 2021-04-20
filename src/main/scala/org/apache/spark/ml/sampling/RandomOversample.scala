@@ -74,21 +74,26 @@ class RandomOversampleModel private[ml](override val uid: String) extends Model[
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val balanecedDF = if(counts.count() > 1) {
+
+    val balancedDF = if(counts.count() > 1) {
       val clsList = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
       val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
         .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-       datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+      if($(oversamplesOnly)) {
+        clsDFs.reduce(_ union _)
+      } else {
+        datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+      }
     } else {
       oversample(datasetIndexed, $(singleClassOversamplingSize))
     }
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
   override def transformSchema(schema: StructType): StructType = {

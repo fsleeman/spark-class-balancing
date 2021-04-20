@@ -181,8 +181,12 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
           getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(),
             majorityClassCount, $(samplingRatios))))
 
+      val balanecedDF = if($(oversamplesOnly)) {
+        clsDFs.reduce(_ union _)
+      } else {
+        datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+      }
 
-      val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
       val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
       balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))

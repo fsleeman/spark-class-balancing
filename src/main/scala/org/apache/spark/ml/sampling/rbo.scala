@@ -121,8 +121,8 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
 
     val sampledArray: Array[(Double, DenseVector)] = addedPoints.map(x=>(minorityClassLabel, x)).toArray
     val sampledDF = spark.createDataFrame(spark.sparkContext.parallelize(sampledArray))
-    sampledDF.withColumnRenamed("_2", "label")
-      .withColumnRenamed("_3", "features")
+    sampledDF.withColumnRenamed("_1", "label")
+      .withColumnRenamed("_2", "features")
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
@@ -150,11 +150,17 @@ class RBOModel private[ml](override val uid: String) extends Model[RBOModel] wit
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
       .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(), majorityClassCount, $(samplingRatios))))
 
-    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val balancedDF = if($(oversamplesOnly)) {
+      clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    }
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol))
+
   }
 
   override def transformSchema(schema: StructType): StructType = {

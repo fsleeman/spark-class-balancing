@@ -50,7 +50,7 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
 
   def getNewSample(current: DenseVector, i: DenseVector, range: Double) : DenseVector = {
     val xx: Array[Array[Double]] = Array(current.values, i.values)
-    val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * range * (x(1) + x(0)))
+    val sample: Array[Double] = xx.transpose.map(x=>x(0) + Random.nextDouble * range * (x(1) - x(0)))
     Vectors.dense(sample).toDense
   }
 
@@ -171,11 +171,16 @@ class BorderlineSMOTEModel private[ml](override val uid: String) extends Model[B
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
       .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(), majorityClassCount, $(samplingRatios))))
 
-    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val balancedDF = if($(oversamplesOnly)) {
+      clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    }
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
   override def transformSchema(schema: StructType): StructType = {

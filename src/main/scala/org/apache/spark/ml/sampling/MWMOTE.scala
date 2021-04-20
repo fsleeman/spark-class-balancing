@@ -8,13 +8,12 @@ import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd}
 import org.apache.spark.ml.sampling.utils.{getCountsByClass, getMatchingClassCount}
 import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset}
 import org.apache.spark.mllib.random.RandomRDDs.randomVectorRDD
 import org.apache.spark.mllib.random.UniformGenerator
-
 
 import scala.collection.mutable
 import scala.util.Random
@@ -97,11 +96,18 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val df = dataset.toDF
     import df.sparkSession.implicits._
     val spark = df.sparkSession
+    println("~~~~~~~~ at oversample")
+    dataset.show()
+    println(minorityClassLabel)
+    println(samplesToAdd)
 
     val featureLength = df.select("features").take(1)(0)(0).asInstanceOf[DenseVector].size
 
     val Smin = df.filter(df($(labelCol)) === minorityClassLabel)
     val Smaj = df.filter(df($(labelCol)) =!= minorityClassLabel)
+    println("df: " + df.count())
+    println("Smaj: " + Smaj.count())
+    println("examples to add: " + samplesToAdd)
 
     /*1) find k1 NNs of minority examples
       2) from minority examples, remove examples with no minority example neighbors
@@ -268,7 +274,7 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
         .withColumnRenamed("_2",$(featuresCol))
     } else {
       val r = new RandomOversample()
-      val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd)
+      val model = r.fit(Smin).setSingleClassOversampling(samplesToAdd).setOversamplesOnly(${oversamplesOnly})
       model.transform(Smin).toDF()
     }
 
@@ -289,6 +295,8 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    println("label map")
+    println(labelMap)
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
 
     val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
@@ -296,13 +304,21 @@ class MWMOTEModel private[ml](override val uid: String) extends Model[MWMOTEMode
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
-    val minorityClasses = counts.collect.map(x=>(x(0).toString.toDouble, x(1).toString.toInt)).filter(x=>x._1!=majorityClassLabel)
-    val balancedDF: DataFrame = minorityClasses.map(x=>oversample(datasetSelected, x._1, majorityClassCount - x._2)).reduce(_ union _).union(datasetSelected.toDF()).select($(labelCol), $(featuresCol))
+    val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
+    val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected))
+      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble,
+        datasetSelected.filter(col($(labelCol)) === x._1).count(), majorityClassCount, $(samplingRatios))))
+
+    val balancedDF = if($(oversamplesOnly)) {
+      clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    }
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
+      .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
   override def transformSchema(schema: StructType): StructType = {

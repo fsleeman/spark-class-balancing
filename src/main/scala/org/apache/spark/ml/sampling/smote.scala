@@ -75,6 +75,8 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    println("label map")
+    println(labelMap)
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
 
     val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
@@ -88,10 +90,15 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
       .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
 
-    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val balancedDF = if($(oversamplesOnly)) {
+      clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    }
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
       .withColumnRenamed("originalLabel",  $(labelCol))
   }
 

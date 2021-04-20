@@ -28,7 +28,7 @@ private[ml] trait SafeLevelSMOTEModelParams extends Params with HasFeaturesCol w
   final val samplingCorrectionRate: Param[Double] = new Param[Double](this, "samplingCorrectionRate", "proportion of over/undersampling to allow")
 
   /** @group getParam */
-  final def setClusterK(value: Double): this.type = set(samplingCorrectionRate, value)
+  final def setSamplingCorrectionRate(value: Double): this.type = set(samplingCorrectionRate, value)
 
   setDefault(samplingCorrectionRate -> 0.05)
 }
@@ -74,7 +74,7 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
       } else {
         (1.0 - ratios(index)) + Random.nextDouble() * ratios(index)
       }
-      val syntheticExample = Vectors.dense(Array(features.toArray, neighborFeatures(index).toArray).transpose.map(x=>x(0) + (x(1) - x(0) * gap))).toDense
+      val syntheticExample = Vectors.dense(Array(features.toArray, neighborFeatures(index).toArray).transpose.map(x=>x(0) + (x(1) - x(0)) * gap)).toDense
 
       Row(label, syntheticExample)
     }
@@ -187,11 +187,16 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
         getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(),
           majorityClassCount, $(samplingRatios))))
 
-    val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val balancedDF = if($(oversamplesOnly)) {
+      clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    }
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
-      .withColumnRenamed("originalLabel",  $(labelCol))//.repartition(1)
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop( $(labelCol))
+      .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
   override def transformSchema(schema: StructType): StructType = {

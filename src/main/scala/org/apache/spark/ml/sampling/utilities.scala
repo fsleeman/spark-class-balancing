@@ -57,13 +57,29 @@ object utilities {
       *
       * @group param
       */
-    val samplingRatios = new Param[Map[Double, Double]](this, "samplingRatios", "map of sampling ratios per class")
+    // val samplingRatios = new Param[Map[Double, Double]](this, "samplingRatios", "map of sampling ratios per class")
+    final val samplingRatios = new Param[Map[Double, Double]](this, "samplingRatios", "map of sampling ratios per class")
 
-    setDefault(samplingRatios -> Map())
 
     /** @group getParam */
     def getSamplingRatios: Map[Double, Double] = $(samplingRatios)
 
+    final def setSamplingRatios(value: Map[Double, Double]): this.type = set(samplingRatios, value)
+
+    /**
+      * Param map for specifying if only oversampled synthetic examples be returned or original examples as well
+      * Default: false
+      *
+      * @group param
+      */
+    final val oversamplesOnly = new Param[Boolean](this, "oversamplesOnly", "should only oversampled synthetic examples be returned")
+
+    /** @group getParam */
+    def getOversamplesOnly: Boolean = $(oversamplesOnly)
+
+    final def setOversamplesOnly(value: Boolean): this.type = set(oversamplesOnly, value)
+
+    setDefault(samplingRatios -> Map(), oversamplesOnly -> false)
   }
 
   trait UsingKNN extends Params {
@@ -132,7 +148,7 @@ object utilities {
   }
 
   def getSamplesToAdd(label: Double, sampleCount: Long, majorityClassCount: Int, samplingRatios: Map[Double, Double]): Int ={
-    println("samplesToAdd " + sampleCount + " " + majorityClassCount)
+    println("%% samplesToAdd " + label + " " + sampleCount + " " + majorityClassCount)
     println(samplingRatios)
 
     if(samplingRatios contains label) {
