@@ -8,8 +8,7 @@ import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.DataFrame
-
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, getSamplingMap}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.udf
 
@@ -67,10 +66,12 @@ class RandomUndersampleModel private[ml](override val uid: String) extends Model
     val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
     val minorityClassCount = counts.orderBy("_2").take(1)(0)(1).toString.toInt
 
+    // FIXME - change sampling method
+    val samplingMapConverted: Map[Double, Double] = getSamplingMap($(samplingRatios), labelMap)
     val clsList: Array[Double] = counts.select("_1").collect().map(x=>x(0).toString.toDouble)
 
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
-      .map(x=>underSample(x._2, getSamplesToKeep(x._1.toDouble, x._2.count, minorityClassCount, $(samplingRatios))))
+      .map(x=>underSample(x._2, getSamplesToKeep(x._1.toDouble, x._2.count, minorityClassCount, samplingMapConverted)))
 
     val balanecedDF = clsDFs.reduce(_ union _)
     val restoreLabel = udf((label: Double) => labelMapReversed(label))

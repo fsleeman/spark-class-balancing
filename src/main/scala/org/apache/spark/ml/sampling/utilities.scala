@@ -7,9 +7,11 @@ import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.HasFeaturesCol
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
 import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN}
+import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.functions.{count, udf}
 import org.apache.spark.sql.types._
+
 import scala.util.Random
 
 
@@ -57,13 +59,27 @@ object utilities {
       *
       * @group param
       */
-    val samplingRatios = new Param[Map[Double, Double]](this, "samplingRatios", "map of sampling ratios per class")
-
-    setDefault(samplingRatios -> Map())
+    final val samplingRatios = new Param[Map[String, Double]](this, "samplingRatios", "map of sampling ratios per class")
 
     /** @group getParam */
-    def getSamplingRatios: Map[Double, Double] = $(samplingRatios)
+    def getSamplingRatios: Map[String, Double] = $(samplingRatios)
 
+    final def setSamplingRatios(value: Map[String, Double]): this.type = set(samplingRatios, value)
+
+    /**
+      * Param map for specifying if only oversampled synthetic examples be returned or original examples as well
+      * Default: false
+      *
+      * @group param
+      */
+    final val oversamplesOnly = new Param[Boolean](this, "oversamplesOnly", "should only oversampled synthetic examples be returned")
+
+    /** @group getParam */
+    def getOversamplesOnly: Boolean = $(oversamplesOnly)
+
+    final def setOversamplesOnly(value: Boolean): this.type = set(oversamplesOnly, value)
+
+    setDefault(samplingRatios -> Map(), oversamplesOnly -> false)
   }
 
   trait UsingKNN extends Params {
@@ -117,14 +133,12 @@ object utilities {
   }
 
 
+  def getSamplingMap(samplingRatios: Map[String, Double], mappedLabels: Map[String, Double]): Map[Double, Double] = {
+    samplingRatios.map(x=>(mappedLabels(x._1), x._2))
+  }
+
   def calculateToTreeSize(topTreeSize: Int, datasetCount: Long): Int ={
     if(topTreeSize >= datasetCount.toInt || datasetCount.toInt < 100) {
-      if(datasetCount.toInt == 0) {
-        println("~~~~~~~~~~~~~~~~~~ zero datasetCount")
-      } else {
-        println("~~~~~~~~~~~~~~~~~~ datasetCount " + datasetCount.toInt)
-      }
-
       datasetCount.toInt
     } else {
       topTreeSize
@@ -132,20 +146,15 @@ object utilities {
   }
 
   def getSamplesToAdd(label: Double, sampleCount: Long, majorityClassCount: Int, samplingRatios: Map[Double, Double]): Int ={
-    println("samplesToAdd " + sampleCount + " " + majorityClassCount)
-    println(samplingRatios)
-
+    println("~~~ " + label + " " + sampleCount + " " + majorityClassCount)
     if(samplingRatios contains label) {
       val ratio = samplingRatios(label)
       if(ratio <= 1) {
-        println("sample count 0")
         0
       } else {
-        println("sample count " + ((ratio - 1.0) * sampleCount).toInt)
         ((ratio - 1.0) * sampleCount).toInt
       }
     } else {
-      println("sample count " + (majorityClassCount - sampleCount.toInt))
       majorityClassCount - sampleCount.toInt
     }
   }
@@ -155,7 +164,6 @@ object utilities {
     val aggregatedCounts = df.groupBy(label).agg(count(label)).take(numberOfClasses.toInt) //FIXME
 
     val sc = df.sparkSession.sparkContext
-    //val countSeq = aggregatedCounts.map(x => (x(0).toString, x(1).toString.toInt)).toSeq
     val countSeq = aggregatedCounts.map(x => (x(0).toString, x(1).toString)).toSeq
     val rdd = sc.parallelize(countSeq)
 
@@ -172,7 +180,7 @@ object utilities {
     df.withColumn("features", convertToVector($"features"))
   }
 
-  val toDense = udf((v: org.apache.spark.ml.linalg.Vector) => v.toDense)
+  val toDense: UserDefinedFunction = udf((v: org.apache.spark.ml.linalg.Vector) => v.toDense)
 
   def createSmoteStyleExample(features: DenseVector, randomNeighbor: DenseVector): DenseVector ={
     val gap = Random.nextDouble()

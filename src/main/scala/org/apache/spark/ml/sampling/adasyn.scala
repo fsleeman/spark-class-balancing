@@ -13,10 +13,8 @@ import org.apache.spark.sql.functions.{desc, udf}
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.StructType
-
 import scala.collection.mutable
 import scala.util.Random
-
 
 
 /** Transformer Parameters*/
@@ -118,15 +116,18 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
+    val samplingMapConverted: Map[Double, Double] = getSamplingMap($(samplingRatios), labelMap)
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
-
-    // val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
-    //  .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
-
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected))
-      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.filter(x._2($(labelCol))===x._1.toDouble).count(), majorityClassCount, $(samplingRatios))))
+      .map(x=>oversample(x._2, x._1, getSamplesToAdd(x._1.toDouble, x._2.filter(x._2($(labelCol))===x._1.toDouble).count(),
+        majorityClassCount, samplingMapConverted)))
 
-    val balanecedDF = datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    val balanecedDF = if($(oversamplesOnly)) {
+      clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+    }
+
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
     balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))
@@ -141,7 +142,6 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     val copied = new ADASYNModel(uid)
     copyValues(copied, extra).setParent(parent)
   }
-
 }
 
 /** Estimator Parameters*/

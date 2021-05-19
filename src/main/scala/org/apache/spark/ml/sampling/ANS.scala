@@ -6,10 +6,10 @@ import org.apache.spark.ml.knn.{KNN, KNNModel}
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasSeed}
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, calculateToTreeSize}
+import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd, getSamplingMap}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.sql.functions.{desc, udf, lit}
+import org.apache.spark.sql.functions.{desc, lit, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
 
@@ -174,15 +174,20 @@ class ANSModel private[ml](override val uid: String) extends Model[ANSModel] wit
       val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
       val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
+      val samplingMapConverted: Map[Double, Double] = getSamplingMap($(samplingRatios), labelMap)
       val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
       val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected, x))
         .map(x=>oversample(x._2, x._1,
           getSamplesToAdd(x._1.toDouble, datasetSelected.filter(datasetSelected($(labelCol))===clsList(x._3)).count(),
-            majorityClassCount, $(samplingRatios))))
+            majorityClassCount, samplingMapConverted)))
 
+      val balanecedDF = if($(oversamplesOnly)) {
+        clsDFs.reduce(_ union _)
+      } else {
+        datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
+      }
 
-      val balanecedDF = datasetIndexed.select($(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
       val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
       balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop( $(labelCol))

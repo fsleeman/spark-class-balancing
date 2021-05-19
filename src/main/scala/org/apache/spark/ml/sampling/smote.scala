@@ -50,7 +50,7 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
       .setAuxCols(Array($(labelCol), $(featuresCol)))
       .setBalanceThreshold($(balanceThreshold))
 
-    println("^^^ smote partitions: " + dataset.rdd.getNumPartitions + " dataset size: " + dataset.count())
+    // println("^^^ smote partitions: " + dataset.rdd.getNumPartitions + " dataset size: " + dataset.count())
 
     val knnModel: KNNModel = model.fit(dataset)
     val nearestNeighborDF = knnModel.transform(dataset)
@@ -71,12 +71,9 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val datasetIndexed = indexer.fit(dataset).transform(dataset)
       .withColumnRenamed($(labelCol), "originalLabel")
       .withColumnRenamed("labelIndexed",  $(labelCol))
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
-    val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
+    val labelMap: Map[String, Double] = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
-    println(labelMapReversed)
 
     val datasetSelected = datasetIndexed.select($(labelCol), $(featuresCol))
     val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
@@ -84,24 +81,27 @@ class SMOTEModel private[ml](override val uid: String) extends Model[SMOTEModel]
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
 
+    //val m2 = Map[String, Double]("1" -> 5.0, "2" -> 10.0, "5" -> 20.0)
+    //println(m2)
+    //println(labelMap)
+    //println(samplingMapConverted)
+    //m2.map(x=>(labelMap(x._1), x._2))
+    val samplingMapConverted: Map[Double, Double] = getSamplingMap($(samplingRatios), labelMap)
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
 
     val clsDFs = clsList.indices.map(x=>(clsList(x), datasetSelected.filter(datasetSelected($(labelCol))===clsList(x))))
-      .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
+      //.map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, $(samplingRatios))))
+      .map(x=>oversample(x._2, getSamplesToAdd(x._1.toDouble, x._2.count, majorityClassCount, samplingMapConverted)))
 
-    val oversampledOnly = false
-
-    // reverse?
-    val balanecedDF = if(oversampledOnly) {
-       datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
-    } else {
+    val balancedDF = if($(oversamplesOnly)) {
       clsDFs.reduce(_ union _)
+    } else {
+      datasetIndexed.select( $(labelCol), $(featuresCol)).union(clsDFs.reduce(_ union _))
     }
-
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balanecedDF.withColumn("originalLabel", restoreLabel(balanecedDF.col($(labelCol)))).drop($(labelCol))
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
       .withColumnRenamed("originalLabel",  $(labelCol))
   }
 
