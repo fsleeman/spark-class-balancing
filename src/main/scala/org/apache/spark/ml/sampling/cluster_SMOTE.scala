@@ -44,8 +44,6 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val features = row(1).asInstanceOf[mutable.WrappedArray[DenseVector]]
     // Randomly oversample if knn couldn't give valid results
     if (features.length < ${k} + 1) {
-     // dataset.rdd.takeSample(withReplacement = false, 1)(0).asInstanceOf[Row](1).asInstanceOf[DenseVector]
-      // println("Random.nextInt(backupSamples.length): " + backupSamples.length)
       backupSamples(Random.nextInt(backupSamples.length))(1).asInstanceOf[DenseVector]
     } else {
       val aSample = features(0).toArray
@@ -92,11 +90,8 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val model = kMeans.fit(minorityDF)
     val predictions = model.transform(minorityDF)
 
-
     val clusters = (0 until $(clusterK)).map(x=>predictions.filter(predictions("prediction")===x))
       .filter(x=>x.count() > 0).toArray
-    //val clusters = (0 until 1).map(x=>predictions.filter(predictions("prediction")===0))
-    //  .filter(x=>x.count() > 0).toArray
 
     // knn for each cluster
     knnClusters = clusters.map(x=>calculateKnnByCluster(spark, x).select($(labelCol), "neighborFeatures").collect).filter(x=>x.length > 0)
@@ -120,8 +115,6 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val datasetIndexed = indexer.fit(dataset).transform(dataset)
       .withColumnRenamed($(labelCol), "originalLabel")
       .withColumnRenamed("labelIndexed",  $(labelCol))
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
@@ -130,9 +123,6 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
     val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString
     val majorityClassCount = counts.orderBy(desc("_2")).take(1)(0)(1).toString.toInt
-
-    println("**** cls selected")
-    datasetSelected.filter(datasetSelected($(labelCol))===2.0).show
 
     val samplingMapConverted: Map[Double, Double] = getSamplingMap($(samplingRatios), labelMap)
     val clsList: Array[Double] = counts.select("_1").filter(counts("_1") =!= majorityClassLabel).collect().map(x=>x(0).toString.toDouble)
@@ -147,7 +137,7 @@ class ClusterSMOTEModel private[ml](override val uid: String) extends Model[Clus
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
 
-    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop( $(labelCol))
+    balancedDF.withColumn("originalLabel", restoreLabel(balancedDF.col($(labelCol)))).drop($(labelCol))
       .withColumnRenamed("originalLabel",  $(labelCol))
   }
 

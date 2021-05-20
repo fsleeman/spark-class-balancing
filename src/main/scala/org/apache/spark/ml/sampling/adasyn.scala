@@ -68,17 +68,14 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
 
     val fitModel: KNNModel = model.fit(dataset)
     val minorityDataNeighbors = fitModel.transform(minorityDF)
-    println("*** neighbors")
 
     val getMajorityNeighborRatio = udf((array: mutable.WrappedArray[String]) => {
       array.tail.map(x => isMajorityNeighbor(array.head, x)).sum / $(k).toFloat
     })
 
     val dfNeighborRatio = minorityDataNeighbors.withColumn("neighborClassRatio", getMajorityNeighborRatio($"neighbors.label")).filter(col("neighborClassRatio") < 1.0)
-    dfNeighborRatio.select("label", "neighborClassRatio").show()
 
     val neighborRatioSum = dfNeighborRatio.agg(sum("neighborClassRatio")).first.get(0).toString.toDouble
-    println("ratio sum: " + neighborRatioSum)
     val getSampleCount = udf((density: Double) => {
       Math.round(density / neighborRatioSum * G.toDouble)
     })
@@ -87,12 +84,8 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
       getSampleCount($"neighborClassRatio")).withColumn("labels", $"neighbors.label")
       .withColumn("neighborFeatures", $"neighbors.features")
 
-    println("*** adjusted")
-    adjustedRatios.show()
     val syntheticExamples: Array[Array[Row]] = adjustedRatios.collect.map(x => generateExamples(x))
     val totalExamples: Array[Row] = syntheticExamples.flatMap(x => x.toSeq)
-
-    println("~~ added for " + minorityClassLabel + ": " + totalExamples.length)
 
     spark.createDataFrame(dataset.sparkSession.sparkContext.parallelize(totalExamples), dataset.schema)
   }
@@ -105,8 +98,6 @@ class ADASYNModel private[ml](override val uid: String) extends Model[ADASYNMode
     val datasetIndexed = indexer.fit(dataset).transform(dataset)
       .withColumnRenamed($(labelCol), "originalLabel")
       .withColumnRenamed("labelIndexed",  $(labelCol))
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))

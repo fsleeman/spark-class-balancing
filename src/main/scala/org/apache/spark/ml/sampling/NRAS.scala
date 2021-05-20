@@ -77,7 +77,6 @@ class NRASModel private[ml](override val uid: String) extends Model[NRASModel] w
 
     val updated = probs.withColumn("updatedFeatures", addPropensityValue(probs($(featuresCol)), probs("minorityClassProbability")))
       .drop($(featuresCol)).withColumnRenamed("updatedFeatures", $(featuresCol))
-    updated.show
 
     val model = new KNN().setFeaturesCol($(featuresCol))
       .setTopTreeSize(calculateToTreeSize($(topTreeSize), propensity.count()))

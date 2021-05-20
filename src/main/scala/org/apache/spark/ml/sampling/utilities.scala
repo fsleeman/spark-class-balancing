@@ -146,7 +146,6 @@ object utilities {
   }
 
   def getSamplesToAdd(label: Double, sampleCount: Long, majorityClassCount: Int, samplingRatios: Map[Double, Double]): Int ={
-    println("~~~ " + label + " " + sampleCount + " " + majorityClassCount)
     if(samplingRatios contains label) {
       val ratio = samplingRatios(label)
       if(ratio <= 1) {

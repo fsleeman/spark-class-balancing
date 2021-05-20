@@ -167,8 +167,6 @@ class SafeLevelSMOTEModel private[ml](override val uid: String) extends Model[Sa
     val datasetIndexed = indexer.fit(dataset).transform(dataset)
       .withColumnRenamed($(labelCol), "originalLabel")
       .withColumnRenamed("labelIndexed",  $(labelCol))
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))

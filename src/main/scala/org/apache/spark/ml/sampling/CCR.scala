@@ -156,7 +156,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val spark = dataset.sparkSession
     import spark.implicits._
 
-    println("minorityClassLabel: " + minorityClassLabel)
     val minorityDF = dataset.filter(dataset($(labelCol)) === minorityClassLabel)
     val majorityDF = dataset.filter(dataset($(labelCol)) =!= minorityClassLabel)
 
@@ -189,7 +188,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
       .withColumnRenamed("_7", "majorityFeatures")
 
     val result = minorityDataNeighborsDF.withColumn("ri", stuff($"distances"))
-    result.show
 
     val invertRi: UserDefinedFunction = udf((ri: Double) => {
       Math.pow(ri, -1)
@@ -197,19 +195,12 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
 
     val inverseRi = result.withColumn("riInverted", invertRi($"ri"))
 
-    //val inverseRiSum = inverseRi.select("riInverted").rdd.map(x=>x(0).toString.toDouble).reduce(_ + _)
-
     val X: RDD[Double] = inverseRi.select("riInverted").rdd.map(x=>x(0).toString.toDouble)
-    for(line <- X.collect()) {
-      println("*" + line)
-    }
-    println("X length: " + X.count())
+
 
     if(X.count() == 0) { // random oversample
-      val foo = dataset.sample(withReplacement = true, (dataset.count + samplesToAdd) / dataset.count.toDouble)
-
-      println("~~~ 0 size count: " + foo.count())
-      foo
+      val samples = dataset.sample(withReplacement = true, (dataset.count + samplesToAdd) / dataset.count.toDouble)
+      samples
     } else {
       val inverseRiSum = X.reduce(_ + _)
 
@@ -287,14 +278,11 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     val datasetIndexed = indexer.fit(dataset).transform(dataset)
       .withColumnRenamed($(labelCol), "originalLabel")
       .withColumnRenamed("labelIndexed",  $(labelCol))
-    datasetIndexed.show()
-    datasetIndexed.printSchema()
 
     val labelMap = datasetIndexed.select("originalLabel",  $(labelCol)).distinct().collect().map(x=>(x(0).toString, x(1).toString.toDouble)).toMap
     val labelMapReversed = labelMap.map(x=>(x._2, x._1))
 
     val datasetSelected = datasetIndexed.select("index", $(labelCol), $(featuresCol))
-    datasetSelected.printSchema()
 
     val counts = getCountsByClass(datasetSelected.sparkSession, $(labelCol), datasetSelected.toDF).sort("_2")
     val majorityClassLabel = counts.orderBy(desc("_2")).take(1)(0)(0).toString.toDouble
@@ -305,9 +293,6 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     var ds = datasetSelected
     for(minorityClass<-minorityClasses) {
       ds = oversample(ds, minorityClass._1, majorityClassCount - minorityClass._2)
-
-      println("@@@@ counts after " + minorityClass._1)
-      getCountsByClass(ds.sparkSession, $(labelCol), ds).show(100)
     }
 
     ds = removeNegatives(ds)
