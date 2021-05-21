@@ -294,7 +294,7 @@ class CCRModel private[ml](override val uid: String) extends Model[CCRModel] wit
     for(minorityClass<-minorityClasses) {
       ds = oversample(ds, minorityClass._1, majorityClassCount - minorityClass._2)
     }
-
+    ds.show()
     ds = removeNegatives(ds)
 
     val restoreLabel = udf((label: Double) => labelMapReversed(label))
