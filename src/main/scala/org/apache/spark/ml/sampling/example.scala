@@ -12,7 +12,7 @@ import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 
 import scala.io.Source
 import scala.util.Random
-import org.apache.spark.ml.sampling.utilities.{convertFeaturesToVector, getCountsByClass}
+import org.apache.spark.ml.sampling.Utilities.{convertFeaturesToVector, getCountsByClass}
 
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 

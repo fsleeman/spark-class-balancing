@@ -13,7 +13,7 @@ import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.knn.{KNN, KNNModel}
 import utils.getMatchingClassCount
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd, getSamplingMap}
+import org.apache.spark.ml.sampling.Utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, calculateToTreeSize, getSamplesToAdd, getSamplingMap}
 
 import scala.collection.mutable
 import scala.util.Random

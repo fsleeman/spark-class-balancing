@@ -11,7 +11,7 @@ import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions.{col, desc, udf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, getSamplingMap}
+import org.apache.spark.ml.sampling.Utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN, getSamplesToAdd, getSamplingMap}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 
 import scala.util.Random

@@ -15,14 +15,14 @@ import org.apache.spark.ml.attribute.Attribute
 import scala.io.Source
 import org.apache.spark.ml.knn.KNN
 import org.apache.spark.mllib.evaluation.MulticlassMetrics
-import org.apache.spark.ml.sampling.utilities.{convertFeaturesToVector, getCountsByClass}
+import org.apache.spark.ml.sampling.Utilities.{convertFeaturesToVector, getCountsByClass}
 import org.apache.spark.sql.functions._
 import org.apache.spark.ml._
 import org.apache.spark.sql.types.{DoubleType, StructType}
 
 import scala.collection.mutable
 //FIXME - turn classes back to Ints instead of Doubles
-object Sampling {
+object SamplingExperiments {
 
   var resultIndex = 0
   //var results = ""

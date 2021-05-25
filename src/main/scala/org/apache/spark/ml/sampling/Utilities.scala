@@ -6,7 +6,7 @@ import org.apache.spark.ml.knn.KNN
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.ml.param.shared.HasFeaturesCol
 import org.apache.spark.ml.param.{Param, ParamMap, Params}
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN}
+import org.apache.spark.ml.sampling.Utilities.{ClassBalancingRatios, HasLabelCol, UsingKNN}
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.functions.{count, udf}
@@ -15,7 +15,7 @@ import org.apache.spark.sql.types._
 import scala.util.Random
 
 
-object utilities {
+object Utilities {
 
   /**
     * Trait for shared param featuresCol (default: "features").

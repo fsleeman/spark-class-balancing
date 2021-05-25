@@ -8,7 +8,7 @@ import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.ml.sampling.utilities.{ClassBalancingRatios, HasLabelCol, getSamplingMap}
+import org.apache.spark.ml.sampling.Utilities.{ClassBalancingRatios, HasLabelCol, getSamplingMap}
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.udf
 

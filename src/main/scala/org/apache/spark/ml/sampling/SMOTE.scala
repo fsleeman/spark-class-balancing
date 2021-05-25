@@ -12,7 +12,7 @@ import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import scala.collection.mutable
 import scala.util.Random
 import org.apache.spark.ml.knn.{KNN, KNNModel}
-import org.apache.spark.ml.sampling.utilities._
+import org.apache.spark.ml.sampling.Utilities._
 import org.apache.spark.ml.sampling.utils.getCountsByClass
 import org.apache.spark.sql.functions.{desc, udf}
 

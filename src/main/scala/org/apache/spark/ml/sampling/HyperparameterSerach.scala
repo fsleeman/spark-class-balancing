@@ -6,7 +6,7 @@ import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.classification.{LinearSVC, OneVsRest, RandomForestClassifier}
 import org.apache.spark.ml.feature.StringIndexer
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector, Vectors}
-import org.apache.spark.ml.sampling.utilities.{convertFeaturesToVector, getCountsByClass}
+import org.apache.spark.ml.sampling.Utilities.{convertFeaturesToVector, getCountsByClass}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
@@ -20,7 +20,7 @@ import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.ml.tuning.{CrossValidator, ParamGridBuilder}
 import org.apache.spark.sql.Row
 import org.apache.spark.ml.classification.{LinearSVC, OneVsRest, RandomForestClassifier}
-import org.apache.spark.ml.sampling.Sampling.filterByMinorityType
+import org.apache.spark.ml.sampling.SamplingExperiments.filterByMinorityType
 
 
 //FIXME - turn classes back to Ints instead of Doubles
