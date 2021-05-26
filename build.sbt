@@ -24,9 +24,9 @@ resolvers += "Spark Packages Repo" at "http://dl.bintray.com/spark-packages/mave
 
 // libraryDependencies += "saurfang" % "spark-knn" % "0.2.0"
 
-libraryDependencies += "org.apache.spark.ml,knn" % "spark-knn" % "0.2.0" from "file:////home/ford/repos/fsleeman/spark-knn/classes/artifacts/spark_knn_core_spark_knn_jar/spark-knn-core-spark-knn.jar"
+libraryDependencies += "org.apache.spark.ml,knn" % "spark-knn" % "0.2.0" from "file:////" + sys.env.get("SPARK_KNN").get
 
-mainClass in assembly := Some("edu.vcu.sleeman.Sampling")
+mainClass in assembly := Some("org.apache.spark.ml.sampling.SamplingExample")
 
 
 
