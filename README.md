@@ -32,11 +32,20 @@ The spark-class-balancing library is designed to build a fat jar using the _sbt_
 
 Since the spark-knn (fsleeman fork) library is a dependency of spark-class-balancing, it must also be built as far jar using a similar method and the file must be included using the `SPARK_KNN` environmental variable which is referenced in the _build.sbt_ file. The resulting spark-class-balancing jar file can then be used for running a Spark job, both in the local or cluster mode.
 
+# Running the Example Program
+Using the local mode, the example program can be run with the following command: 
+
+	spark-submit --class org.apache.spark.ml.sampling.SamplingExample [path to your jar file]
+
+The run command will be different in the cluster mode and will be dependent of your specific setup.	
+
+	
+
 # Using Sampling Methods
 Invoking one of the oversampling methods is straightforward as shown below in this example using standard SMOTE. 
 
-  val method = new SMOTE
-  val model = method.fit(trainData).setK(5)
-  val sampledData = model.transform(trainData)
+  	val method = new SMOTE
+  	val model = method.fit(trainData).setK(5)
+  	val sampledData = model.transform(trainData)
 
 Using the _fit/transform_ pattern, a new SMOTE estimator is instantiated and then a model is created with the _fit_ function. The resulting model is set with prediction parameters, in this case setting the _k_ value to 5, and finally the trainData DataFrame is transformed to produce oversampled data. The same process is done for every other oversampling methods, although available parameters may change.
