@@ -6,7 +6,7 @@ This project includes implementions of the following oversampling methods writte
 * CCR
 * Cluster SMOTE
 * Gaussian SMOTE
-* k-Means SMOTE
+* _k_-Means SMOTE
 * MWMOTE
 * NRAS
 * Random Oversampling
@@ -20,7 +20,7 @@ Since each of these algorithms were designed for binary class problems, this Spa
 The SamplingExample.scala file gives an example of how to load data from a csv and perform minority class oversampling. In addition, the SamplingTemplate.scala file can be used to as a template when implementing new sampling methods.
 
 # Dependencies
-Many of these sampling algorithms, such as SMOTE variants, include a \textit{k}-Nearest Neighbors search. Instead of creating that method from scratch, an efficient implementation from spark-knn (https://github.com/saurfang/spark-knn) was used. However, the spark-knn implementation did not support nearest neighbor search by distance radius which was required by ANS and CCR. To address this limitation, spark-knn was forked (https://github.com/fsleeman/spark-knn) and the distance search feature was added. 
+Many of these sampling algorithms, such as SMOTE variants, include a _k_-Nearest Neighbors search. Instead of creating that method from scratch, an efficient implementation from spark-knn (https://github.com/saurfang/spark-knn) was used. However, the spark-knn implementation did not support nearest neighbor search by distance radius which was required by ANS and CCR. To address this limitation, spark-knn was forked (https://github.com/fsleeman/spark-knn) and the distance search feature was added. 
 
 The spark-class-balancing library was developed using Spark 3.0.1 with Scala 2.12.1 and currently has following dependencies: spark-core, spark-sql, spark-mllib, breeze-natives, breeze, spark-knn (from the fsleeman). The original spark-knn implementation was based on Spark 2 and so the forked version was updated to be compatible with Spark 3.
 
@@ -49,3 +49,12 @@ Invoking one of the oversampling methods is straightforward as shown below in th
   	val sampledData = model.transform(trainData)
 
 Using the _fit/transform_ pattern, a new SMOTE estimator is instantiated and then a model is created with the _fit_ function. The resulting model is set with prediction parameters, in this case setting the _k_ value to 5, and finally the trainData DataFrame is transformed to produce oversampled data. The same process is done for every other oversampling methods, although available parameters may change.
+
+By default, each method will attempt to oversample the minority classes to be the same size as the largest (majority) class. However, the final class counts may be slightly different because of how some underlying functions work in Spark. There are a few cases where there is still a significant amount of class imbalance because of some built in rules of the original algorithms. These oversampling methods can be updated to account for this and work better with Spark. 
+
+In addition to majority size oversampling, you can also manually specify the oversampling rates for each minority class. The _setSamplingRatios_ function can be used on most of the methods (not CCR which modifies the majority class as well) and pass in a dictonary style _Map_ object with user specified rates. For example, If you want to oversample classes 1 and 5 by 3x and 10x respectively, use `val samplingMap: Map[String, Double] = Map( "1" -> 3.0, "5" -> 10.0 )` with
+	
+	val r = new SMOTE().setSamplingRatios(samplingMap)
+	
+The `setOversamplesOnly` function can also be used to return oversamples only, not the original and oversampled examples. This function takes a boolean for input with the default set to `false`.
+
