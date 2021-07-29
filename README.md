@@ -58,3 +58,17 @@ In addition to majority size oversampling, you can also manually specify the ove
 	
 The `setOversamplesOnly` function can also be used to return oversamples only, not the original and oversampled examples. This function takes a boolean for input with the default set to `false`.
 
+# Related Manuscript
+Extensive experimental results and observations on the use of these algorithms can be found here: https://arxiv.org/abs/2107.11508
+
+Please consider citing this work if it has been helpful in your research. BibTeX reference:
+```
+@misc{sleeman2021imbalanced,
+      title={Imbalanced Big Data Oversampling: Taxonomy, Algorithms, Software, Guidelines and Future Directions}, 
+      author={William C. Sleeman IV and Bartosz Krawczyk},
+      year={2021},
+      eprint={2107.11508},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+```
