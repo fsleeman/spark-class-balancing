@@ -24,7 +24,7 @@ object Example {
 
   def main(args: Array[String]) {
 
-    val filename = "/home/ford/data/sampling_input_kurgan.txt"
+    val filename = "sampling_input.txt"
     val lines = Source.fromFile(filename).getLines.map(x=>x.split(":")(0)->x.split(":")(1)).toMap
     val input_file = lines("dataset").trim
     val classifier = lines("classifier").trim
