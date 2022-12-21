@@ -1,0 +1,7 @@
+sampling: smote
+classifier: rf
+labelColumn: [name of the label column]
+enableScaling: true
+numCrossValidationSplits: 1
+savePath: /add/your/path
+dataset: /add/your/path/your_dataset.csv
